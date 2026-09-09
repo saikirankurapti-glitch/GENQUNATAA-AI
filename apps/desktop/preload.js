@@ -11,14 +11,11 @@ contextBridge.exposeInMainWorld('genquantaa', {
   startMeetingMonitor: (payload) => ipcRenderer.invoke('start-meeting-monitor', payload),
   stopMeetingMonitor: () => ipcRenderer.invoke('stop-meeting-monitor'),
   getMeetingState: () => ipcRenderer.invoke('meeting-state'),
-  onMeetingState: (callback) => {
-    const listener = (_event, payload) => callback(payload);
-    ipcRenderer.on('meeting-state', listener);
-    return () => ipcRenderer.removeListener('meeting-state', listener);
-  },
-  onCopilotUpdate: (callback) => {
-    const listener = (_event, payload) => callback(payload);
-    ipcRenderer.on('copilot-update', listener);
-    return () => ipcRenderer.removeListener('copilot-update', listener);
-  },
+  onMeetingState: (callback) => { const listener = (_event, payload) => callback(payload); ipcRenderer.on('meeting-state', listener); return () => ipcRenderer.removeListener('meeting-state', listener); },
+  getScreenContextSources: () => ipcRenderer.invoke('screen-context-sources'),
+  startScreenContext: (sourceId) => ipcRenderer.invoke('screen-context-start', sourceId),
+  stopScreenContext: () => ipcRenderer.invoke('screen-context-stop'),
+  getScreenContextState: () => ipcRenderer.invoke('screen-context-state'),
+  onScreenContextState: (callback) => { const listener = (_event, payload) => callback(payload); ipcRenderer.on('screen-context-state', listener); return () => ipcRenderer.removeListener('screen-context-state', listener); },
+  onCopilotUpdate: (callback) => { const listener = (_event, payload) => callback(payload); ipcRenderer.on('copilot-update', listener); return () => ipcRenderer.removeListener('copilot-update', listener); },
 });
