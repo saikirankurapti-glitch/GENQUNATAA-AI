@@ -14,12 +14,22 @@ class Settings(BaseSettings):
     gemini_embedding_dimensions: int = 768
     database_url: str = "postgresql+asyncpg://genquantaa:genquantaa@localhost:5432/genquantaa"
     redis_url: str = "redis://localhost:6379/0"
+    bootstrap_admin_emails: str = ""
+    bootstrap_cto_emails: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property
     def cors_origin_list(self) -> list[str]:
         return [x.strip() for x in self.cors_origins.split(",") if x.strip()]
+
+    @property
+    def bootstrap_admin_email_list(self) -> set[str]:
+        return {x.strip().lower() for x in self.bootstrap_admin_emails.split(",") if x.strip()}
+
+    @property
+    def bootstrap_cto_email_list(self) -> set[str]:
+        return {x.strip().lower() for x in self.bootstrap_cto_emails.split(",") if x.strip()}
 
 
 @lru_cache
