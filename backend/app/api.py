@@ -8,6 +8,7 @@ from .ai import GeminiService
 from .db import get_db
 from .db_models import MessageRecord, SessionRecord
 from .models import ChatRequest, ChatResponse, Session, SessionCreate
+from .rag import retriever
 
 router = APIRouter(prefix="/api/v1")
 ai = GeminiService()
@@ -51,8 +52,15 @@ async def chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)) -> Chat
     elif not await db.get(SessionRecord, session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
+    retrieved = await retriever.retrieve(db, payload.message, limit=5)
+    retrieved_context = "\n\n".join(
+        f"Source: {item['filename']}\n{item['content']}" for item in retrieved
+    )
+    context_parts = [part for part in [payload.context, retrieved_context] if part]
+    context = "\n\n".join(context_parts) or None
+
     try:
-        answer = await ai.generate(payload.message, payload.context)
+        answer = await ai.generate(payload.message, context)
     except RuntimeError as exc:
         await db.rollback()
         raise HTTPException(status_code=502, detail=str(exc)) from exc
