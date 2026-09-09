@@ -69,7 +69,13 @@ async def upload_document(file: UploadFile = File(...), db: AsyncSession = Depen
                 vector = await _embeddings.embed(chunk)
             except Exception:
                 vector = None
-        db.add(DocumentChunk(document_id=document.id, chunk_index=index, content=chunk, embedding=serialize_embedding(vector) if vector else None))
+        db.add(DocumentChunk(
+            document_id=document.id,
+            chunk_index=index,
+            content=chunk,
+            embedding=serialize_embedding(vector) if vector else None,
+            embedding_vector=vector or None,
+        ))
     await db.commit()
     await db.refresh(document)
     return DocumentOut(id=document.id, filename=document.filename, content_type=document.content_type, characters=len(text), chunks=len(chunks))
