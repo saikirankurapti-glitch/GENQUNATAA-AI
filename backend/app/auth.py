@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import hmac
 import os
+import secrets
 from uuid import UUID
 
 from argon2 import PasswordHasher
@@ -43,7 +44,10 @@ def _needs_password_rehash(stored: str) -> bool:
 
 
 def _token(user_id: UUID, expires: datetime, secret: str | None = None) -> str:
-    payload = f"{user_id}:{int(expires.timestamp())}"
+    # Include a random nonce so multiple logins in the same second never
+    # generate the same server-side session token.
+    nonce = secrets.token_urlsafe(16)
+    payload = f"{user_id}:{int(expires.timestamp())}:{nonce}"
     signature = hmac.new((secret or _SECRET).encode(), payload.encode(), "sha256").hexdigest()
     return f"{payload}:{signature}"
 
@@ -54,8 +58,8 @@ def _token_hash(token: str) -> str:
 
 def _decode(token: str) -> tuple[UUID, datetime] | None:
     try:
-        user_text, expiry_text, signature = token.split(":", 2)
-        payload = f"{user_text}:{expiry_text}"
+        user_text, expiry_text, nonce, signature = token.split(":", 3)
+        payload = f"{user_text}:{expiry_text}:{nonce}"
         expected = hmac.new(_SECRET.encode(), payload.encode(), "sha256").hexdigest()
         if not hmac.compare_digest(signature, expected):
             return None
@@ -67,13 +71,22 @@ def _decode(token: str) -> tuple[UUID, datetime] | None:
         return None
 
 
+def _utc(value: datetime | None) -> datetime | None:
+    """Normalize DB datetimes for SQLite/PostgreSQL timezone differences."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 async def _session_for_token(db: AsyncSession, token: str) -> tuple[AuthSessionRecord, UserRecord] | None:
     decoded = _decode(token)
     if not decoded:
         return None
     session = await db.scalar(select(AuthSessionRecord).where(AuthSessionRecord.token_hash == _token_hash(token)))
     now = datetime.now(timezone.utc)
-    if not session or session.revoked_at is not None or session.expires_at <= now:
+    if not session or session.revoked_at is not None or (_utc(session.expires_at) or now) <= now:
         return None
     user = await db.get(UserRecord, session.user_id)
     if not user or not user.is_active:
