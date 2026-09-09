@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 import hmac
 import os
-from uuid import UUID, uuid4
+from uuid import UUID
 
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
@@ -19,20 +20,24 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 _SESSION_COOKIE = "genquantaa_session"
 _SESSION_TTL = timedelta(days=7)
 _SECRET = os.getenv("AUTH_SECRET", "development-only-change-me")
+_PASSWORD_HASHER = PasswordHasher()
 
 
 def _hash_password(password: str) -> str:
-    salt = os.urandom(16)
-    digest = sha256(salt + password.encode()).hexdigest()
-    return f"{salt.hex()}${digest}"
+    return _PASSWORD_HASHER.hash(password)
 
 
 def _verify_password(password: str, stored: str) -> bool:
     try:
-        salt_hex, expected = stored.split("$", 1)
-        actual = sha256(bytes.fromhex(salt_hex) + password.encode()).hexdigest()
-        return hmac.compare_digest(actual, expected)
-    except (ValueError, TypeError):
+        return _PASSWORD_HASHER.verify(stored, password)
+    except (VerifyMismatchError, VerificationError, InvalidHashError, ValueError, TypeError):
+        return False
+
+
+def _needs_password_rehash(stored: str) -> bool:
+    try:
+        return _PASSWORD_HASHER.check_needs_rehash(stored)
+    except (InvalidHashError, ValueError, TypeError):
         return False
 
 
@@ -110,7 +115,7 @@ def set_session(response: Response, user_id: UUID) -> None:
         _token(user_id, expires),
         max_age=int(_SESSION_TTL.total_seconds()),
         httponly=True,
-        secure=False,
+        secure=os.getenv("APP_ENV", "development").lower() in {"production", "prod"},
         samesite="lax",
         path="/",
     )
@@ -135,6 +140,8 @@ async def login(payload: LoginRequest, response: Response, db: AsyncSession = De
     user = await db.scalar(select(UserRecord).where(UserRecord.email == email))
     if not user or not user.is_active or not _verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    if _needs_password_rehash(user.password_hash):
+        user.password_hash = _hash_password(payload.password)
     user.last_login_at = datetime.now(timezone.utc)
     await db.commit()
     set_session(response, user.id)
