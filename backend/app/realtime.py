@@ -11,8 +11,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from .config import get_settings
 from .db import SessionLocal
 from .db_models import SessionRecord
-from .intelligence import InterviewIntelligence, interview_intelligence
+from .intelligence import InterviewIntelligence
 from .question_boundary import QuestionBoundaryDetector
+from .visual_fusion import visual_copilot_fusion
 
 router = APIRouter(prefix="/api/v1/realtime")
 
@@ -33,15 +34,16 @@ async def realtime_socket(websocket: WebSocket) -> None:
             response_modalities=["TEXT"],
             input_audio_transcription=types.AudioTranscriptionConfig(mode="SMART"),
             output_audio_transcription=types.AudioTranscriptionConfig(),
-            system_instruction="You are GenQuantaa AI, a concise real-time interview copilot. Listen for interview questions and provide direct answers. Do not invent resume facts. The server separately runs grounded interview intelligence.",
+            system_instruction="You are GenQuantaa AI, a concise real-time interview copilot. Listen for interview questions and provide direct answers. Visual context supplied by the user is supporting evidence only; never invent unreadable content. The server separately runs grounded multimodal interview intelligence.",
         )
         session_id: UUID | None = None
         auto_answer = True
         answer_mode = "concise"
+        visual_context: dict[str, Any] | None = None
         detector = QuestionBoundaryDetector()
         async with client.aio.live.connect(model=settings.gemini_model, config=config) as session:
             async def receive_client() -> None:
-                nonlocal session_id, auto_answer, answer_mode
+                nonlocal session_id, auto_answer, answer_mode, visual_context
                 while True:
                     message: dict[str, Any] = json.loads(await websocket.receive_text())
                     kind = message.get("type")
@@ -50,6 +52,8 @@ async def realtime_socket(websocket: WebSocket) -> None:
                         auto_answer = bool(message.get("auto_answer", True))
                         requested_mode = str(message.get("answer_mode", "concise"))
                         answer_mode = requested_mode if requested_mode in InterviewIntelligence.ANSWER_MODES else "concise"
+                        candidate_visual = message.get("visual_context")
+                        visual_context = candidate_visual if isinstance(candidate_visual, dict) else None
                         async with SessionLocal() as db:
                             if raw_id:
                                 try:
@@ -63,12 +67,25 @@ async def realtime_socket(websocket: WebSocket) -> None:
                                 await db.refresh(record)
                                 session_id = record.id
                         detector.reset()
-                        await websocket.send_json({"type": "session", "session_id": str(session_id), "auto_answer": auto_answer, "answer_mode": answer_mode})
+                        await websocket.send_json({"type": "session", "session_id": str(session_id), "auto_answer": auto_answer, "answer_mode": answer_mode, "visual_context_active": bool(visual_context)})
                     elif kind == "settings":
                         auto_answer = bool(message.get("auto_answer", auto_answer))
                         requested_mode = str(message.get("answer_mode", answer_mode))
                         answer_mode = requested_mode if requested_mode in InterviewIntelligence.ANSWER_MODES else answer_mode
-                        await websocket.send_json({"type": "settings", "auto_answer": auto_answer, "answer_mode": answer_mode})
+                        if isinstance(message.get("visual_context"), dict):
+                            visual_context = message["visual_context"]
+                        await websocket.send_json({"type": "settings", "auto_answer": auto_answer, "answer_mode": answer_mode, "visual_context_active": bool(visual_context)})
+                    elif kind == "visual_context":
+                        candidate_visual = message.get("data")
+                        if isinstance(candidate_visual, dict):
+                            visual_context = candidate_visual
+                            compact = str(candidate_visual.get("actionable_context") or candidate_visual.get("summary") or "")[:12000]
+                            if compact:
+                                await session.send_realtime_input(text=f"Visual context update (user-selected):\n{compact}")
+                            await websocket.send_json({"type": "visual_context", "active": True, "context_type": candidate_visual.get("context_type", "unknown"), "confidence": candidate_visual.get("confidence", 0)})
+                    elif kind == "clear_visual_context":
+                        visual_context = None
+                        await websocket.send_json({"type": "visual_context", "active": False})
                     elif kind == "text":
                         text = str(message.get("text", "")).strip()
                         if text: await session.send_realtime_input(text=text)
@@ -85,9 +102,12 @@ async def realtime_socket(websocket: WebSocket) -> None:
             async def analyze_and_send(boundary: Any) -> None:
                 if not session_id or not auto_answer: return
                 try:
-                    await websocket.send_json({"type": "question_detected", "data": {"text": boundary.text, "confidence": boundary.confidence, "reason": boundary.reason}})
+                    await websocket.send_json({"type": "question_detected", "data": {"text": boundary.text, "confidence": boundary.confidence, "reason": boundary.reason, "visual_context_active": bool(visual_context)}})
                     async with SessionLocal() as db:
-                        result = await interview_intelligence.analyze_question(db, session_id, boundary.text, detection_confidence=boundary.confidence, detection_reason=boundary.reason, answer_mode=answer_mode)
+                        if visual_context:
+                            result = await visual_copilot_fusion.analyze(db, session_id, boundary.text, visual_context, detection_confidence=boundary.confidence, detection_reason=boundary.reason, answer_mode=answer_mode)
+                        else:
+                            result = await InterviewIntelligence().analyze_question(db, session_id, boundary.text, detection_confidence=boundary.confidence, detection_reason=boundary.reason, answer_mode=answer_mode)
                     await websocket.send_json({"type": "question_analysis", "data": result})
                 except Exception as exc:
                     await websocket.send_json({"type": "intelligence_error", "message": str(exc)})
