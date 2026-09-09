@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    gemini_embedding_model: str = "gemini-embedding-2"
+    gemini_embedding_dimensions: int = 768
     database_url: str = "postgresql+asyncpg://genquantaa:genquantaa@localhost:5432/genquantaa"
     redis_url: str = "redis://localhost:6379/0"
 
