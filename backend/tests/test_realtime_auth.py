@@ -5,6 +5,8 @@ from uuid import uuid4
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./test_realtime_auth.db"
 os.environ["AUTH_SECRET"] = "test-realtime-secret"
 
+import pytest
+from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -24,11 +26,10 @@ def register(client: TestClient, email: str) -> None:
 
 def test_realtime_rejects_unauthenticated_socket() -> None:
     with TestClient(app) as client:
-        try:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect("/api/v1/realtime/ws"):
                 raise AssertionError("unauthenticated websocket was accepted")
-        except Exception as exc:
-            assert "403" in str(exc) or "1008" in str(exc)
+        assert exc_info.value.code == 1008
 
 
 def test_realtime_session_ownership_is_enforced() -> None:
