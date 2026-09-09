@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from .auth import websocket_user
 from .config import get_settings
 from .db import SessionLocal
 from .db_models import SessionRecord
@@ -21,6 +22,11 @@ router = APIRouter(prefix="/api/v1/realtime")
 @router.websocket("/ws")
 async def realtime_socket(websocket: WebSocket) -> None:
     await websocket.accept()
+    user = await websocket_user(websocket)
+    if not user:
+        await websocket.send_json({"type": "error", "message": "Authentication required"})
+        await websocket.close(code=1008)
+        return
     settings = get_settings()
     if not settings.gemini_api_key:
         await websocket.send_json({"type": "error", "message": "GEMINI_API_KEY is not configured."})
@@ -58,10 +64,13 @@ async def realtime_socket(websocket: WebSocket) -> None:
                             if raw_id:
                                 try:
                                     candidate = UUID(str(raw_id))
-                                    if await db.get(SessionRecord, candidate): session_id = candidate
-                                except ValueError: pass
+                                    owned = await db.scalar(select(SessionRecord).where(SessionRecord.id == candidate, SessionRecord.user_id == user.id))
+                                    if owned:
+                                        session_id = candidate
+                                except ValueError:
+                                    pass
                             if session_id is None:
-                                record = SessionRecord(title="Live interview", mode="live")
+                                record = SessionRecord(title="Live interview", mode="live", user_id=user.id)
                                 db.add(record)
                                 await db.commit()
                                 await db.refresh(record)
@@ -88,10 +97,12 @@ async def realtime_socket(websocket: WebSocket) -> None:
                         await websocket.send_json({"type": "visual_context", "active": False})
                     elif kind == "text":
                         text = str(message.get("text", "")).strip()
-                        if text: await session.send_realtime_input(text=text)
+                        if text:
+                            await session.send_realtime_input(text=text)
                     elif kind == "context":
                         text = str(message.get("text", "")).strip()
-                        if text: await session.send_realtime_input(text=f"Context update:\n{text}")
+                        if text:
+                            await session.send_realtime_input(text=f"Context update:\n{text}")
                     elif kind == "audio":
                         data = base64.b64decode(message.get("data", ""))
                         if data:
@@ -100,14 +111,19 @@ async def realtime_socket(websocket: WebSocket) -> None:
                         await session.send_realtime_input(audio_stream_end=True)
 
             async def analyze_and_send(boundary: Any) -> None:
-                if not session_id or not auto_answer: return
+                if not session_id or not auto_answer:
+                    return
                 try:
                     await websocket.send_json({"type": "question_detected", "data": {"text": boundary.text, "confidence": boundary.confidence, "reason": boundary.reason, "visual_context_active": bool(visual_context)}})
                     async with SessionLocal() as db:
+                        owned = await db.scalar(select(SessionRecord).where(SessionRecord.id == session_id, SessionRecord.user_id == user.id))
+                        if not owned:
+                            await websocket.send_json({"type": "intelligence_error", "message": "Session is no longer available"})
+                            return
                         if visual_context:
-                            result = await visual_copilot_fusion.analyze(db, session_id, boundary.text, visual_context, detection_confidence=boundary.confidence, detection_reason=boundary.reason, answer_mode=answer_mode)
+                            result = await visual_copilot_fusion.analyze(db, session_id, boundary.text, visual_context, detection_confidence=boundary.confidence, detection_reason=boundary.reason, answer_mode=answer_mode, user_id=user.id)
                         else:
-                            result = await InterviewIntelligence().analyze_question(db, session_id, boundary.text, detection_confidence=boundary.confidence, detection_reason=boundary.reason, answer_mode=answer_mode)
+                            result = await InterviewIntelligence().analyze_question(db, session_id, boundary.text, detection_confidence=boundary.confidence, detection_reason=boundary.reason, answer_mode=answer_mode, user_id=user.id)
                     await websocket.send_json({"type": "question_analysis", "data": result})
                 except Exception as exc:
                     await websocket.send_json({"type": "intelligence_error", "message": str(exc)})
@@ -117,7 +133,8 @@ async def realtime_socket(websocket: WebSocket) -> None:
                     server = getattr(response, "server_content", None)
                     if server:
                         interim = getattr(server, "interim_input_transcription", None)
-                        if interim and getattr(interim, "text", None): await websocket.send_json({"type": "transcript_interim", "text": interim.text})
+                        if interim and getattr(interim, "text", None):
+                            await websocket.send_json({"type": "transcript_interim", "text": interim.text})
                         final = getattr(server, "input_transcription", None)
                         if final and getattr(final, "text", None):
                             transcript = final.text.strip()
@@ -126,17 +143,21 @@ async def realtime_socket(websocket: WebSocket) -> None:
                                 await websocket.send_json({"type": "transcript", "text": transcript})
                                 if "?" in transcript:
                                     boundary = detector.flush()
-                                    if boundary: asyncio.create_task(analyze_and_send(boundary))
+                                    if boundary:
+                                        asyncio.create_task(analyze_and_send(boundary))
                         output = getattr(server, "output_transcription", None)
-                        if output and getattr(output, "text", None): await websocket.send_json({"type": "text", "text": output.text})
+                        if output and getattr(output, "text", None):
+                            await websocket.send_json({"type": "text", "text": output.text})
                         if getattr(server, "interrupted", False):
                             detector.reset()
                             await websocket.send_json({"type": "interrupted"})
                         if getattr(server, "turn_complete", False):
                             boundary = detector.flush()
-                            if boundary: asyncio.create_task(analyze_and_send(boundary))
+                            if boundary:
+                                asyncio.create_task(analyze_and_send(boundary))
                             await websocket.send_json({"type": "turn_complete"})
-                    if response.text: await websocket.send_json({"type": "text", "text": response.text})
+                    if response.text:
+                        await websocket.send_json({"type": "text", "text": response.text})
             await asyncio.gather(receive_client(), send_model())
     except WebSocketDisconnect:
         return
@@ -144,4 +165,5 @@ async def realtime_socket(websocket: WebSocket) -> None:
         try:
             await websocket.send_json({"type": "error", "message": str(exc)})
             await websocket.close(code=1011)
-        except Exception: pass
+        except Exception:
+            pass
