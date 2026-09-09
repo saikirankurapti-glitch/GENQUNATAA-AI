@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 from uuid import UUID
 
@@ -32,15 +31,38 @@ class InterviewIntelligence:
         )
         return value.startswith(starters)
 
-    async def analyze_question(self, db: AsyncSession, session_id: UUID, transcript: str) -> dict[str, Any]:
+    @staticmethod
+    def _source_details(retrieved: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "filename": str(item.get("filename", "Unknown source")),
+                "score": round(float(item.get("score", 0.0)), 3),
+                "snippet": str(item.get("content", ""))[:180].replace("\n", " "),
+            }
+            for item in retrieved
+        ]
+
+    async def analyze_question(
+        self,
+        db: AsyncSession,
+        session_id: UUID,
+        transcript: str,
+        detection_confidence: float = 1.0,
+        detection_reason: str = "manual",
+    ) -> dict[str, Any]:
         retrieved = await retriever.retrieve(db, transcript, limit=6)
+        source_details = self._source_details(retrieved)
+        allowed_sources = [item["filename"] for item in source_details]
         context = "\n\n".join(
-            f"Source: {item['filename']}\n{item['content']}" for item in retrieved
+            f"Source ID: {index + 1}\nFilename: {item['filename']}\n{item['content']}"
+            for index, item in enumerate(retrieved)
         ) or "No resume or knowledge-base context matched."
 
         prompt = f"""You are GenQuantaa AI's interview intelligence engine.
 Analyze the interviewer's question and produce a concise candidate-ready answer.
 Use the supplied resume/knowledge context when relevant. Never invent candidate experience.
+Source attribution MUST use only the supplied filenames. If a source was not used, omit it.
+Confidence should reflect answer correctness AND how strongly the supplied context supports it.
 
 Return ONLY valid JSON with these keys:
 question_type: one of technical, behavioral, system_design, coding, project, general
@@ -48,7 +70,7 @@ answer: a concise spoken answer in first person where appropriate
 key_points: array of 3 to 6 short points
 confidence: number from 0 to 1
 follow_up: one likely follow-up question
-sources: array of source filenames used
+sources: array of source filenames used, selected ONLY from the supplied filenames
 
 Question:
 {transcript}
@@ -98,27 +120,54 @@ Context:
                     "key_points": [],
                     "confidence": 0.5,
                     "follow_up": "",
-                    "sources": [item["filename"] for item in retrieved],
+                    "sources": [],
                 }
 
-        confidence = max(0.0, min(1.0, float(result.get("confidence", 0.5))))
+        model_confidence = max(0.0, min(1.0, float(result.get("confidence", 0.5))))
+        retrieved_scores = [float(item.get("score", 0.0)) for item in retrieved]
+        retrieval_strength = max(0.0, min(1.0, max(retrieved_scores, default=0.0)))
+        grounded_confidence = (model_confidence * 0.70) + (retrieval_strength * 0.20) + (max(0.0, min(1.0, detection_confidence)) * 0.10)
+        if not retrieved:
+            grounded_confidence = min(model_confidence, max(0.25, detection_confidence * 0.70))
+
         answer = str(result.get("answer", "")).strip()
+        requested_sources = {str(item).strip() for item in result.get("sources", []) if str(item).strip()}
+        sources = [filename for filename in allowed_sources if filename in requested_sources]
+        if requested_sources and not sources:
+            sources = allowed_sources[:3]
+
         record = InterviewQuestion(
             session_id=session_id,
             transcript=transcript,
             question_type=str(result.get("question_type", "general")),
             answer=answer,
             key_points=json.dumps(result.get("key_points", [])),
-            confidence=confidence,
+            confidence=round(grounded_confidence, 4),
             follow_up=str(result.get("follow_up", "")),
-            sources=json.dumps(result.get("sources", [item["filename"] for item in retrieved])),
+            sources=json.dumps(sources),
         )
         db.add(record)
         db.add(MessageRecord(session_id=session_id, role="interviewer", content=transcript))
         db.add(MessageRecord(session_id=session_id, role="assistant", content=answer))
         await db.commit()
         await db.refresh(record)
-        return self.serialize_question(record)
+        payload = self.serialize_question(record)
+        payload.update({
+            "detection_confidence": round(max(0.0, min(1.0, detection_confidence)), 3),
+            "detection_reason": detection_reason,
+            "retrieval_strength": round(retrieval_strength, 3),
+            "confidence_label": self.confidence_label(grounded_confidence),
+            "source_details": source_details,
+        })
+        return payload
+
+    @staticmethod
+    def confidence_label(value: float) -> str:
+        if value >= 0.80:
+            return "High"
+        if value >= 0.60:
+            return "Medium"
+        return "Low"
 
     async def add_note(self, db: AsyncSession, session_id: UUID, content: str, note_type: str = "insight") -> None:
         if content.strip():
