@@ -23,7 +23,15 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    from .db_models import Document, DocumentChunk, MessageRecord, ResumeProfile, SessionRecord  # noqa: F401
+    from .db_models import (
+        Document,
+        DocumentChunk,
+        InterviewQuestion,
+        MessageRecord,
+        ResumeProfile,
+        SessionNote,
+        SessionRecord,
+    )  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
