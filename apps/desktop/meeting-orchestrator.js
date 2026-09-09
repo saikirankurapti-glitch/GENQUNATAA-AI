@@ -25,11 +25,12 @@ function sanitizeTitle(value) {
 }
 
 class MeetingOrchestrator {
-  constructor({ mainWindow, webUrl, apiUrl, authCookieProvider, onState }) {
+  constructor({ mainWindow, webUrl, apiUrl, authCookieProvider, onAuthRequired, onState }) {
     this.mainWindow = mainWindow;
     this.webUrl = webUrl;
     this.apiUrl = apiUrl;
     this.authCookieProvider = authCookieProvider;
+    this.onAuthRequired = onAuthRequired;
     this.onState = onState;
     this.timer = null;
     this.state = { active: false, provider: null, provider_name: null, meeting_url: null, session_id: null, title: null };
@@ -42,7 +43,11 @@ class MeetingOrchestrator {
 
   async authenticatedFetch(url, options = {}) {
     const cookie = await this.authCookieProvider?.();
-    if (!cookie) throw new Error('Please sign in to GenQuantaa AI before starting a meeting session.');
+    if (!cookie) {
+      this.emit({ active: false, status: 'auth_required', error: 'Please sign in to GenQuantaa AI before starting a meeting session.' });
+      await this.onAuthRequired?.();
+      throw new Error('Authentication required');
+    }
     const headers = { ...(options.headers || {}), Cookie: cookie };
     return fetch(url, { ...options, headers });
   }
@@ -65,6 +70,7 @@ class MeetingOrchestrator {
       if (response.status === 401) {
         await this.stop(false);
         this.emit({ active: false, status: 'auth_required', error: 'Your GenQuantaa session has expired. Please sign in again.' });
+        await this.onAuthRequired?.();
         return this.state;
       }
       if (!response.ok) throw new Error(data.detail || `Session creation failed (${response.status})`);
