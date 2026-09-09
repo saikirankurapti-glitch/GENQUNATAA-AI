@@ -1,9 +1,12 @@
 const { app, BrowserWindow, ipcMain, screen, shell } = require('electron');
 const path = require('path');
+const { MeetingOrchestrator, detectMeetingProvider, PROVIDERS } = require('./meeting-orchestrator');
 
 const WEB_URL = process.env.GENQUNTAA_WEB_URL || 'http://localhost:3000';
+const API_URL = process.env.GENQUNTAA_API_URL || 'http://localhost:8000';
 let mainWindow;
 let overlayWindow;
+let meetingOrchestrator;
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
@@ -47,6 +50,12 @@ function createOverlay() {
   overlayWindow.setAlwaysOnTop(true, 'floating');
 }
 
+function broadcastMeetingState(state) {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  overlayWindow.webContents.send('meeting-state', state);
+  if (state.active && state.status === 'running') overlayWindow.showInactive();
+}
+
 app.whenReady().then(() => {
   ipcMain.handle('open-workspace', () => mainWindow?.show());
   ipcMain.handle('open-live', () => mainWindow?.loadURL(`${WEB_URL}/live`));
@@ -64,10 +73,31 @@ app.whenReady().then(() => {
   ipcMain.handle('external-link', (_event, url) => {
     if (typeof url === 'string' && /^https?:\/\//.test(url)) shell.openExternal(url);
   });
+  ipcMain.handle('detect-meeting-provider', (_event, meetingUrl) => {
+    const provider = detectMeetingProvider(meetingUrl);
+    return provider ? { id: provider.id, name: provider.name } : null;
+  });
+  ipcMain.handle('meeting-providers', () => PROVIDERS.map(({ id, name }) => ({ id, name })));
+  ipcMain.handle('start-meeting-monitor', async (_event, payload) => {
+    try {
+      return await meetingOrchestrator.start(payload || {});
+    } catch (error) {
+      return { active: false, status: 'error', error: error instanceof Error ? error.message : 'Meeting orchestration failed' };
+    }
+  });
+  ipcMain.handle('stop-meeting-monitor', () => meetingOrchestrator.stop());
+  ipcMain.handle('meeting-state', () => meetingOrchestrator.getState());
 
   createMainWindow();
   createOverlay();
+  meetingOrchestrator = new MeetingOrchestrator({
+    mainWindow,
+    webUrl: WEB_URL,
+    apiUrl: API_URL,
+    onState: broadcastMeetingState,
+  });
 
+  app.on('before-quit', () => meetingOrchestrator?.stop(false));
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
   });
