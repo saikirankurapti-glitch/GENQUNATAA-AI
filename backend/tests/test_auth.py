@@ -1,3 +1,5 @@
+import asyncio
+import hashlib
 import os
 
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./test_auth.db"
@@ -40,49 +42,39 @@ def test_duplicate_registration_rejected() -> None:
 
 
 def test_password_is_stored_as_argon2_hash() -> None:
+    email = "argon2-test@example.com"
     with TestClient(app) as client:
-        email = "argon2-test@example.com"
         response = client.post("/api/v1/auth/register", json={"email": email, "password": "StrongPass123"})
         assert response.status_code == 201
 
-        import asyncio
+    async def read_hash() -> str:
+        async with SessionLocal() as db:
+            user = await db.scalar(select(UserRecord).where(UserRecord.email == email))
+            assert user is not None
+            return user.password_hash
 
-        async def read_hash() -> str:
-            async with SessionLocal() as db:
-                user = await db.scalar(select(UserRecord).where(UserRecord.email == email))
-                assert user is not None
-                return user.password_hash
-
-        password_hash = asyncio.run(read_hash())
-        assert password_hash.startswith("$argon2")
-        assert "StrongPass123" not in password_hash
+    password_hash = asyncio.run(read_hash())
+    assert password_hash.startswith("$argon2")
+    assert "StrongPass123" not in password_hash
 
 
 def test_logout_revokes_server_side_session() -> None:
+    email = "revoke-test@example.com"
     with TestClient(app) as client:
-        email = "revoke-test@example.com"
         response = client.post("/api/v1/auth/register", json={"email": email, "password": "StrongPass123"})
         assert response.status_code == 201
         token = client.cookies.get("genquantaa_session")
         assert token
-
-        async def read_session() -> AuthSessionRecord | None:
-            async with SessionLocal() as db:
-                return await db.scalar(select(AuthSessionRecord).where(AuthSessionRecord.token_hash == __import__("hashlib").sha256(token.encode()).hexdigest()))
-
-        session = __import__("asyncio").run(read_session())
-        assert session is not None
-        assert session.revoked_at is None
-
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
         assert client.post("/api/v1/auth/logout").status_code == 200
 
-        async def read_revoked() -> AuthSessionRecord | None:
-            async with SessionLocal() as db:
-                return await db.get(AuthSessionRecord, session.id)
+    async def read_session() -> AuthSessionRecord | None:
+        async with SessionLocal() as db:
+            return await db.scalar(select(AuthSessionRecord).where(AuthSessionRecord.token_hash == token_hash))
 
-        revoked = __import__("asyncio").run(read_revoked())
-        assert revoked is not None
-        assert revoked.revoked_at is not None
+    session = asyncio.run(read_session())
+    assert session is not None
+    assert session.revoked_at is not None
 
 
 def test_old_cookie_is_rejected_after_logout() -> None:
