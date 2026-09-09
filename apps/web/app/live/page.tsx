@@ -6,18 +6,6 @@ import { ArrowLeft, Brain, CheckCircle2, FileText, Mic, MicOff, Radio, Send, Set
 type SourceDetail = { filename: string; score: number; snippet: string };
 type Analysis = { id: string; transcript: string; question_type: string; answer: string; key_points: string[]; confidence: number; confidence_label?: string; detection_confidence?: number; detection_reason?: string; retrieval_strength?: number; follow_up: string; sources: string[]; source_details?: SourceDetail[]; answer_mode?: string };
 type Summary = { summary: string; strengths: string[]; gaps: string[]; next_steps: string[]; score: number; question_count: number };
-type MeetingProvider = { id: string; name: string };
-type MeetingState = { active?: boolean; provider?: string | null; provider_name?: string | null; meeting_url?: string | null; session_id?: string | null; title?: string | null; status?: string; error?: string };
-
-declare global { interface Window { genquantaa?: {
-  publishCopilotUpdate?: (payload: unknown) => Promise<boolean>;
-  detectMeetingProvider?: (url: string) => Promise<MeetingProvider | null>;
-  getMeetingProviders?: () => Promise<MeetingProvider[]>;
-  startMeetingMonitor?: (payload: { meetingUrl: string; title?: string; autoAnswer?: boolean; answerMode?: string; openMeeting?: boolean }) => Promise<MeetingState>;
-  stopMeetingMonitor?: () => Promise<MeetingState>;
-  getMeetingState?: () => Promise<MeetingState>;
-  onMeetingState?: (callback: (state: MeetingState) => void) => () => void;
-} } }
 
 function pcm16(input: Float32Array) { const pcm = new Int16Array(input.length); for (let i = 0; i < input.length; i += 1) { const x = Math.max(-1, Math.min(1, input[i])); pcm[i] = x < 0 ? x * 0x8000 : x * 0x7fff; } const bytes = new Uint8Array(pcm.buffer); let binary = ""; for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + 0x8000, bytes.length))); return btoa(binary); }
 
