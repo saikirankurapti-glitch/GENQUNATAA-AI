@@ -8,6 +8,7 @@ from .config import get_settings
 from .db import init_db
 from .documents import router as documents_router
 from .realtime import router as realtime_router
+from .resume import router as resume_router
 
 settings = get_settings()
 
@@ -18,13 +19,14 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="GenQuantaa AI API", version="0.5.0", description="Backend API for the GenQuantaa AI copilot.", lifespan=lifespan)
+app = FastAPI(title="GenQuantaa AI API", version="0.6.0", description="Backend API for the GenQuantaa AI copilot.", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.include_router(router)
 app.include_router(realtime_router)
 app.include_router(documents_router)
+app.include_router(resume_router)
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "service": "genquantaa-api", "database": "configured"}
+    return {"status": "ok", "service": "genquantaa-api", "database": "configured", "rag": "enabled"}
