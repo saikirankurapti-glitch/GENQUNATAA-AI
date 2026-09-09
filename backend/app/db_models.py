@@ -15,7 +15,9 @@ class SessionRecord(Base):
     title: Mapped[str] = mapped_column(String(200), default="Untitled session")
     mode: Mapped[str] = mapped_column(String(50), default="copilot")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    messages: Mapped[list[MessageRecord]] = relationship(cascade="all, delete-orphan")
+    messages: Mapped[list[MessageRecord]] = relationship("MessageRecord", cascade="all, delete-orphan")
+    questions: Mapped[list[InterviewQuestion]] = relationship("InterviewQuestion", cascade="all, delete-orphan")
+    notes: Mapped[list[SessionNote]] = relationship("SessionNote", cascade="all, delete-orphan")
 
 
 class MessageRecord(Base):
@@ -34,7 +36,7 @@ class Document(Base):
     content_type: Mapped[str] = mapped_column(String(100))
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    chunks: Mapped[list[DocumentChunk]] = relationship(cascade="all, delete-orphan")
+    chunks: Mapped[list[DocumentChunk]] = relationship("DocumentChunk", cascade="all, delete-orphan")
 
 
 class DocumentChunk(Base):
@@ -54,3 +56,26 @@ class ResumeProfile(Base):
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     skills: Mapped[str] = mapped_column(Text, default="")
     experience_years: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class InterviewQuestion(Base):
+    __tablename__ = "interview_questions"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    session_id: Mapped[UUID] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    transcript: Mapped[str] = mapped_column(Text)
+    question_type: Mapped[str] = mapped_column(String(50), default="general")
+    answer: Mapped[str] = mapped_column(Text)
+    key_points: Mapped[str] = mapped_column(Text, default="[]")
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    follow_up: Mapped[str] = mapped_column(Text, default="")
+    sources: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SessionNote(Base):
+    __tablename__ = "session_notes"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    session_id: Mapped[UUID] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    note_type: Mapped[str] = mapped_column(String(50), default="insight")
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
