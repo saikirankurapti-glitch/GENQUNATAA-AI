@@ -26,9 +26,9 @@ function createMainWindow() {
 function createOverlay() {
   const { width } = screen.getPrimaryDisplay().workAreaSize;
   overlayWindow = new BrowserWindow({
-    width: 390,
-    height: 190,
-    x: Math.max(16, width - 410),
+    width: 430,
+    height: 280,
+    x: Math.max(16, width - 450),
     y: 24,
     frame: false,
     transparent: true,
@@ -54,6 +54,12 @@ app.whenReady().then(() => {
     if (overlayWindow?.isVisible()) overlayWindow.hide();
     else overlayWindow?.show();
     return overlayWindow?.isVisible() ?? false;
+  });
+  ipcMain.handle('publish-copilot-update', (_event, payload) => {
+    if (!overlayWindow || overlayWindow.isDestroyed() || !payload || typeof payload !== 'object') return false;
+    overlayWindow.showInactive();
+    overlayWindow.webContents.send('copilot-update', payload);
+    return true;
   });
   ipcMain.handle('external-link', (_event, url) => {
     if (typeof url === 'string' && /^https?:\/\//.test(url)) shell.openExternal(url);
