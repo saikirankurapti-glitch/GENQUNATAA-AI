@@ -27,9 +27,10 @@ class VisualCopilotFusion:
         detection_confidence: float = 1.0,
         detection_reason: str = "manual",
         answer_mode: str = "concise",
+        user_id: UUID | None = None,
     ) -> dict[str, Any]:
         mode = answer_mode if answer_mode in self.answer_modes else "concise"
-        retrieved = await retriever.retrieve(db, transcript, limit=6)
+        retrieved = await retriever.retrieve(db, transcript, limit=6, user_id=user_id)
         source_details = [
             {
                 "filename": str(item.get("filename", "Unknown source")),
