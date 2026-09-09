@@ -6,18 +6,16 @@ import { ArrowLeft, Monitor, RefreshCw, Square, Target } from "lucide-react";
 type Source = { id: string; name: string; display_id?: string | null; thumbnail?: string | null };
 type State = { active?: boolean; selected_source?: Source | null; sources?: Source[]; last_capture_at?: string | null; status?: string; error?: string };
 
-declare global { interface Window { genquantaa?: { getScreenContextSources?: () => Promise<State>; startScreenContext?: (sourceId: string) => Promise<State>; stopScreenContext?: () => Promise<State>; getScreenContextState?: () => Promise<State>; onScreenContextState?: (callback: (state: State) => void) => () => void; }; } }
-
 export default function ScreenContextPage() {
   const [state, setState] = useState<State>({ status: "idle", sources: [] });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  async function refresh() { setLoading(true); setError(""); try { const result = await window.genquantaa?.getScreenContextSources?.(); if (result) setState(result); } catch (e) { setError(e instanceof Error ? e.message : "Could not list screen sources."); } finally { setLoading(false); } }
-  useEffect(() => { window.genquantaa?.getScreenContextState?.().then((result) => result && setState(result)); const unsubscribe = window.genquantaa?.onScreenContextState?.(setState); void refresh(); return () => unsubscribe?.(); }, []);
+  async function refresh() { setLoading(true); setError(""); try { const result = await window.genquantaa?.getScreenContextSources?.() as State | undefined; if (result) setState(result); } catch (e) { setError(e instanceof Error ? e.message : "Could not list screen sources."); } finally { setLoading(false); } }
+  useEffect(() => { window.genquantaa?.getScreenContextState?.().then((result) => { if (result) setState(result as State); }); const unsubscribe = window.genquantaa?.onScreenContextState?.((incoming) => setState(incoming as State)); void refresh(); return () => unsubscribe?.(); }, []);
 
-  async function selectSource(id: string) { setLoading(true); setError(""); try { const result = await window.genquantaa?.startScreenContext?.(id); if (result) { setState(result); if (result.status === "error") setError(result.error || "Could not select source."); } } catch (e) { setError(e instanceof Error ? e.message : "Could not start screen context."); } finally { setLoading(false); } }
-  async function stop() { const result = await window.genquantaa?.stopScreenContext?.(); if (result) setState(result); }
+  async function selectSource(id: string) { setLoading(true); setError(""); try { const result = await window.genquantaa?.startScreenContext?.(id) as State | undefined; if (result) { setState(result); if (result.status === "error") setError(result.error || "Could not select source."); } } catch (e) { setError(e instanceof Error ? e.message : "Could not start screen context."); } finally { setLoading(false); } }
+  async function stop() { const result = await window.genquantaa?.stopScreenContext?.() as State | undefined; if (result) setState(result); }
 
   const sources = state.sources || [];
   return <main className="main">
