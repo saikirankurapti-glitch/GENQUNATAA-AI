@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .ai import GeminiService
 from .db_models import InterviewQuestion, MessageRecord, SessionNote, SessionRecord
+from .profile_intelligence import build_profile_context
 from .rag import retriever
 
 
@@ -31,14 +32,19 @@ class InterviewIntelligence:
     async def analyze_question(self, db: AsyncSession, session_id: UUID, transcript: str, detection_confidence: float = 1.0, detection_reason: str = "manual", answer_mode: str = "concise", user_id: UUID | None = None) -> dict[str, Any]:
         answer_mode = answer_mode if answer_mode in self.ANSWER_MODES else "concise"
         retrieved = await retriever.retrieve(db, transcript, limit=6, user_id=user_id)
+        profile = await build_profile_context(db, user_id) if user_id else None
         source_details = self._source_details(retrieved)
         allowed_sources = [item["filename"] for item in source_details]
         context = "\n\n".join(f"Source ID: {index + 1}\nFilename: {item['filename']}\n{item['content']}" for index, item in enumerate(retrieved)) or "No resume or knowledge-base context matched."
+        profile_context = "No authenticated resume profile available."
+        if profile:
+            profile_context = f"Candidate name: {profile.get('name') or 'Not provided'}\nCandidate skills: {', '.join(profile.get('skills', []))}\nExperience years: {profile.get('experience_years') or 'Not provided'}\nResume source: {profile.get('profile_source', 'resume')}\nResume evidence:\n{profile.get('resume_text', '')[:12000]}"
         mode_instruction = {"concise":"Answer in 3-5 spoken sentences. Prioritize clarity and speed.","detailed":"Answer in 6-10 spoken sentences with enough implementation detail for a strong interview response.","star":"For behavioral/project questions use Situation, Task, Action, Result structure. For technical questions, use a similarly structured practical explanation.","technical":"Give a technically deep answer with architecture, implementation choices, trade-offs, and complexity where relevant."}[answer_mode]
         prompt = f"""You are GenQuantaa AI's interview intelligence engine.
 Analyze the interviewer's question and produce a candidate-ready answer.
 {mode_instruction}
-Use the supplied resume/knowledge context when relevant. Never invent candidate experience.
+Use the candidate profile and supplied resume/knowledge context when relevant. Never invent candidate experience.
+For experience/behavioral/project questions, prefer concrete evidence from the candidate profile. For generic technical questions, answer accurately even when the resume is not relevant.
 Source attribution MUST use only the supplied filenames. If a source was not used, omit it.
 Confidence should reflect answer correctness AND how strongly the supplied context supports it.
 
@@ -54,7 +60,10 @@ Answer mode: {answer_mode}
 Question:
 {transcript}
 
-Context:
+Candidate profile:
+{profile_context}
+
+Retrieved knowledge context:
 {context}
 """
         result: dict[str, Any]
@@ -69,8 +78,9 @@ Context:
             except json.JSONDecodeError: result = {"question_type":"general","answer":response.text or "I could not generate an answer.","key_points":[],"confidence":0.5,"follow_up":"","sources":[]}
         model_confidence = max(0.0, min(1.0, float(result.get("confidence", 0.5))))
         retrieval_strength = max(0.0, min(1.0, max((float(item.get("score", 0.0)) for item in retrieved), default=0.0)))
-        grounded_confidence = (model_confidence * 0.70) + (retrieval_strength * 0.20) + (max(0.0, min(1.0, detection_confidence)) * 0.10)
-        if not retrieved: grounded_confidence = min(model_confidence, max(0.25, detection_confidence * 0.70))
+        profile_strength = 0.15 if profile else 0.0
+        grounded_confidence = (model_confidence * 0.65) + (retrieval_strength * 0.15) + (max(0.0, min(1.0, detection_confidence)) * 0.10) + profile_strength
+        if not retrieved and not profile: grounded_confidence = min(model_confidence, max(0.25, detection_confidence * 0.70))
         answer = str(result.get("answer", "")).strip()
         requested_sources = {str(item).strip() for item in result.get("sources", []) if str(item).strip()}
         sources = [filename for filename in allowed_sources if filename in requested_sources]
@@ -78,7 +88,7 @@ Context:
         record = InterviewQuestion(session_id=session_id, transcript=transcript, question_type=str(result.get("question_type", "general")), answer=answer, key_points=json.dumps(result.get("key_points", [])), confidence=round(grounded_confidence, 4), follow_up=str(result.get("follow_up", "")), sources=json.dumps(sources))
         db.add(record); db.add(MessageRecord(session_id=session_id, role="interviewer", content=transcript)); db.add(MessageRecord(session_id=session_id, role="assistant", content=answer)); await db.commit(); await db.refresh(record)
         payload = self.serialize_question(record)
-        payload.update({"answer_mode":answer_mode,"detection_confidence":round(max(0.0,min(1.0,detection_confidence)),3),"detection_reason":detection_reason,"retrieval_strength":round(retrieval_strength,3),"confidence_label":self.confidence_label(grounded_confidence),"source_details":source_details})
+        payload.update({"answer_mode":answer_mode,"detection_confidence":round(max(0.0,min(1.0,detection_confidence)),3),"detection_reason":detection_reason,"retrieval_strength":round(retrieval_strength,3),"profile_context_used":bool(profile),"confidence_label":self.confidence_label(grounded_confidence),"source_details":source_details})
         return payload
 
     @staticmethod
