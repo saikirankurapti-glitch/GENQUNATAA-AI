@@ -3,10 +3,21 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, JSON, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from .config import get_settings
 from .db import Base
+
+try:
+    from pgvector.sqlalchemy import Vector
+except ImportError:  # pragma: no cover - dependency is installed in production/CI
+    Vector = None
+
+
+settings = get_settings()
+# Keep SQLite test/dev databases compatible while using a real pgvector column on PostgreSQL.
+EmbeddingVectorType = Vector(settings.gemini_embedding_dimensions) if Vector and settings.database_url.startswith("postgresql") else JSON
 
 
 class SessionRecord(Base):
@@ -45,7 +56,10 @@ class DocumentChunk(Base):
     document_id: Mapped[UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
     chunk_index: Mapped[int]
     content: Mapped[str] = mapped_column(Text)
+    # Legacy JSON embedding retained for backwards compatibility during migration.
     embedding: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Native pgvector representation used by PostgreSQL semantic search.
+    embedding_vector: Mapped[list[float] | None] = mapped_column(EmbeddingVectorType, nullable=True)
 
 
 class ResumeProfile(Base):
