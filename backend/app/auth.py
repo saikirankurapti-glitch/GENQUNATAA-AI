@@ -6,12 +6,12 @@ import hmac
 import os
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .db import get_db
+from .db import SessionLocal, get_db
 from .db_models import UserRecord
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -84,6 +84,19 @@ async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> 
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="Invalid session")
     return user
+
+
+async def websocket_user(websocket: WebSocket) -> UserRecord | None:
+    token = websocket.cookies.get(_SESSION_COOKIE)
+    decoded = _decode(token) if token else None
+    if not decoded:
+        return None
+    user_id, _ = decoded
+    async with SessionLocal() as db:
+        user = await db.get(UserRecord, user_id)
+        if not user or not user.is_active:
+            return None
+        return user
 
 
 def public_user(user: UserRecord) -> UserOut:
