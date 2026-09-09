@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('genquantaa', {
   onMeetingState: (callback) => { const listener = (_event, payload) => callback(payload); ipcRenderer.on('meeting-state', listener); return () => ipcRenderer.removeListener('meeting-state', listener); },
   getScreenContextSources: () => ipcRenderer.invoke('screen-context-sources'),
   startScreenContext: (sourceId) => ipcRenderer.invoke('screen-context-start', sourceId),
+  analyzeScreenContext: () => ipcRenderer.invoke('screen-context-analyze'),
   stopScreenContext: () => ipcRenderer.invoke('screen-context-stop'),
   getScreenContextState: () => ipcRenderer.invoke('screen-context-state'),
   onScreenContextState: (callback) => { const listener = (_event, payload) => callback(payload); ipcRenderer.on('screen-context-state', listener); return () => ipcRenderer.removeListener('screen-context-state', listener); },
