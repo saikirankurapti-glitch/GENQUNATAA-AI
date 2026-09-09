@@ -1,234 +1,60 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { ArrowLeft, Brain, CheckCircle2, FileText, Mic, MicOff, Radio, Send, Square } from "lucide-react";
+import { ArrowLeft, Brain, CheckCircle2, FileText, Mic, MicOff, Radio, Send, Settings2, Square } from "lucide-react";
 
 type SourceDetail = { filename: string; score: number; snippet: string };
-type Analysis = {
-  id: string;
-  transcript: string;
-  question_type: string;
-  answer: string;
-  key_points: string[];
-  confidence: number;
-  confidence_label?: string;
-  detection_confidence?: number;
-  detection_reason?: string;
-  retrieval_strength?: number;
-  follow_up: string;
-  sources: string[];
-  source_details?: SourceDetail[];
-};
+type Analysis = { id: string; transcript: string; question_type: string; answer: string; key_points: string[]; confidence: number; confidence_label?: string; detection_confidence?: number; detection_reason?: string; retrieval_strength?: number; follow_up: string; sources: string[]; source_details?: SourceDetail[]; answer_mode?: string };
 type Summary = { summary: string; strengths: string[]; gaps: string[]; next_steps: string[]; score: number; question_count: number };
 
-declare global {
-  interface Window {
-    genquantaa?: {
-      publishCopilotUpdate?: (payload: unknown) => Promise<boolean>;
-    };
-  }
-}
+declare global { interface Window { genquantaa?: { publishCopilotUpdate?: (payload: unknown) => Promise<boolean> } } }
 
-function pcm16(input: Float32Array) {
-  const pcm = new Int16Array(input.length);
-  for (let i = 0; i < input.length; i += 1) {
-    const x = Math.max(-1, Math.min(1, input[i]));
-    pcm[i] = x < 0 ? x * 0x8000 : x * 0x7fff;
-  }
-  const bytes = new Uint8Array(pcm.buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + 0x8000, bytes.length)));
-  return btoa(binary);
-}
+function pcm16(input: Float32Array) { const pcm = new Int16Array(input.length); for (let i = 0; i < input.length; i += 1) { const x = Math.max(-1, Math.min(1, input[i])); pcm[i] = x < 0 ? x * 0x8000 : x * 0x7fff; } const bytes = new Uint8Array(pcm.buffer); let binary = ""; for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + 0x8000, bytes.length))); return btoa(binary); }
 
 export default function LivePage() {
-  const ws = useRef<WebSocket | null>(null);
-  const ctx = useRef<AudioContext | null>(null);
-  const processor = useRef<ScriptProcessorNode | null>(null);
-  const source = useRef<MediaStreamAudioSourceNode | null>(null);
-  const stream = useRef<MediaStream | null>(null);
-  const [connected, setConnected] = useState(false);
-  const [listening, setListening] = useState(false);
-  const [input, setInput] = useState("");
-  const [answer, setAnswer] = useState("");
-  const [transcript, setTranscript] = useState("");
-  const [interim, setInterim] = useState("");
-  const [detectedQuestion, setDetectedQuestion] = useState("");
-  const [autoStatus, setAutoStatus] = useState("Waiting for a question");
-  const [error, setError] = useState("");
-  const [sessionId, setSessionId] = useState("");
-  const [analysis, setAnalysis] = useState<Analysis[]>([]);
-  const [notes, setNotes] = useState<string[]>([]);
-  const [summary, setSummary] = useState<Summary | null>(null);
+  const ws = useRef<WebSocket | null>(null); const ctx = useRef<AudioContext | null>(null); const processor = useRef<ScriptProcessorNode | null>(null); const source = useRef<MediaStreamAudioSourceNode | null>(null); const stream = useRef<MediaStream | null>(null);
+  const [connected, setConnected] = useState(false); const [listening, setListening] = useState(false); const [input, setInput] = useState(""); const [answer, setAnswer] = useState(""); const [transcript, setTranscript] = useState(""); const [interim, setInterim] = useState(""); const [detectedQuestion, setDetectedQuestion] = useState(""); const [autoStatus, setAutoStatus] = useState("Waiting for a question"); const [error, setError] = useState(""); const [sessionId, setSessionId] = useState(""); const [analysis, setAnalysis] = useState<Analysis[]>([]); const [notes, setNotes] = useState<string[]>([]); const [summary, setSummary] = useState<Summary | null>(null);
+  const [autoAnswer, setAutoAnswer] = useState(true); const [answerMode, setAnswerMode] = useState("concise");
 
-  function publishToDesktop(payload: unknown) {
-    void window.genquantaa?.publishCopilotUpdate?.(payload);
-  }
+  function publishToDesktop(payload: unknown) { void window.genquantaa?.publishCopilotUpdate?.(payload); }
+  function sendSettings(nextAutoAnswer = autoAnswer, nextMode = answerMode) { if (ws.current?.readyState === WebSocket.OPEN) ws.current.send(JSON.stringify({ type: "settings", auto_answer: nextAutoAnswer, answer_mode: nextMode })); }
 
   function connect() {
-    const api = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const socket = new WebSocket(api.replace(/^http/, "ws") + "/api/v1/realtime/ws");
-    ws.current = socket;
-    socket.onopen = () => {
-      setConnected(true);
-      setError("");
-      setAutoStatus("Listening for interviewer questions");
-      socket.send(JSON.stringify({ type: "start" }));
-    };
-    socket.onclose = () => {
-      setConnected(false);
-      setListening(false);
-      setAutoStatus("Session ended");
-    };
-    socket.onerror = () => setError("Live connection failed. Check the backend and GEMINI_API_KEY.");
-    socket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === "session") setSessionId(data.session_id);
+    const api = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"; const socket = new WebSocket(api.replace(/^http/, "ws") + "/api/v1/realtime/ws"); ws.current = socket;
+    socket.onopen = () => { setConnected(true); setError(""); setAutoStatus(autoAnswer ? "Listening for interviewer questions" : "Manual answer mode"); socket.send(JSON.stringify({ type: "start", auto_answer: autoAnswer, answer_mode: answerMode })); };
+    socket.onclose = () => { setConnected(false); setListening(false); setAutoStatus("Session ended"); }; socket.onerror = () => setError("Live connection failed. Check the backend and GEMINI_API_KEY.");
+    socket.onmessage = (event) => { const data = JSON.parse(event.data);
+      if (data.type === "session") { setSessionId(data.session_id); setAutoAnswer(Boolean(data.auto_answer)); setAnswerMode(data.answer_mode || "concise"); }
+      if (data.type === "settings") { setAutoAnswer(Boolean(data.auto_answer)); setAnswerMode(data.answer_mode || "concise"); setAutoStatus(data.auto_answer ? `Auto-answer · ${data.answer_mode}` : "Manual answer mode"); }
       if (data.type === "text") setAnswer((value) => value + data.text);
-      if (data.type === "transcript") {
-        setTranscript((value) => (value ? value + " " : "") + data.text);
-        setInterim("");
-      }
+      if (data.type === "transcript") { setTranscript((value) => (value ? value + " " : "") + data.text); setInterim(""); }
       if (data.type === "transcript_interim") setInterim(data.text);
-      if (data.type === "question_detected") {
-        setDetectedQuestion(data.data.text);
-        setAutoStatus(`Question detected · ${Math.round(data.data.confidence * 100)}%`);
-        publishToDesktop({ text: data.data.text, confidence: data.data.confidence, confidence_label: "Detecting", answer: "Generating grounded answer…" });
-      }
-      if (data.type === "question_analysis") {
-        setAnalysis((value) => [data.data, ...value]);
-        setAnswer(data.data.answer);
-        setDetectedQuestion(data.data.transcript);
-        setAutoStatus(`Auto-answer ready · ${data.data.confidence_label || "Confidence"}`);
-        publishToDesktop(data.data);
-      }
-      if (data.type === "turn_complete") setAutoStatus("Waiting for next question");
-      if (data.type === "interrupted") {
-        setAnswer("");
-        setAutoStatus("Listening");
-      }
+      if (data.type === "question_detected") { setDetectedQuestion(data.data.text); setAutoStatus(`Question detected · ${Math.round(data.data.confidence * 100)}%`); publishToDesktop({ text: data.data.text, confidence: data.data.confidence, confidence_label: "Detecting", answer: autoAnswer ? "Generating grounded answer…" : "Auto-answer paused" }); }
+      if (data.type === "question_analysis") { setAnalysis((value) => [data.data, ...value]); setAnswer(data.data.answer); setDetectedQuestion(data.data.transcript); setAutoStatus(`Auto-answer ready · ${data.data.confidence_label || "Confidence"}`); publishToDesktop(data.data); }
+      if (data.type === "turn_complete") setAutoStatus(autoAnswer ? "Waiting for next question" : "Manual answer mode");
+      if (data.type === "interrupted") { setAnswer(""); setAutoStatus("Listening"); }
       if (data.type === "error" || data.type === "intelligence_error") setError(data.message);
     };
   }
 
-  async function startMic() {
-    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) return;
-    const media = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.current = media;
-    const audio = new AudioContext({ sampleRate: 16000 });
-    ctx.current = audio;
-    const inputNode = audio.createMediaStreamSource(media);
-    const node = audio.createScriptProcessor(2048, 1, 1);
-    source.current = inputNode;
-    processor.current = node;
-    node.onaudioprocess = (event) => {
-      if (ws.current?.readyState === WebSocket.OPEN) {
-        ws.current.send(JSON.stringify({ type: "audio", data: pcm16(event.inputBuffer.getChannelData(0)), mime_type: "audio/pcm;rate=16000" }));
-      }
-    };
-    inputNode.connect(node);
-    node.connect(audio.destination);
-    setListening(true);
-  }
+  async function startMic() { if (!ws.current || ws.current.readyState !== WebSocket.OPEN) return; const media = await navigator.mediaDevices.getUserMedia({ audio: true }); stream.current = media; const audio = new AudioContext({ sampleRate: 16000 }); ctx.current = audio; const inputNode = audio.createMediaStreamSource(media); const node = audio.createScriptProcessor(2048, 1, 1); source.current = inputNode; processor.current = node; node.onaudioprocess = (event) => { if (ws.current?.readyState === WebSocket.OPEN) ws.current.send(JSON.stringify({ type: "audio", data: pcm16(event.inputBuffer.getChannelData(0)), mime_type: "audio/pcm;rate=16000" })); }; inputNode.connect(node); node.connect(audio.destination); setListening(true); }
+  function stopMic() { processor.current?.disconnect(); source.current?.disconnect(); stream.current?.getTracks().forEach((track) => track.stop()); ctx.current?.close(); processor.current = null; source.current = null; stream.current = null; ctx.current = null; ws.current?.send(JSON.stringify({ type: "audio_end" })); setListening(false); }
+  function send() { if (!input.trim() || !ws.current) return; setAnswer(""); ws.current.send(JSON.stringify({ type: "text", text: input })); setInput(""); }
+  async function saveNote() { if (!sessionId || !input.trim()) return; const api = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"; await fetch(`${api}/api/v1/sessions/${sessionId}/notes`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: input, note_type: "manual" }) }); setNotes((value) => [input, ...value]); setInput(""); }
+  async function loadSummary() { if (!sessionId) return; const api = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"; const response = await fetch(`${api}/api/v1/sessions/${sessionId}/summary`); if (response.ok) setSummary(await response.json()); }
 
-  function stopMic() {
-    processor.current?.disconnect();
-    source.current?.disconnect();
-    stream.current?.getTracks().forEach((track) => track.stop());
-    ctx.current?.close();
-    processor.current = null;
-    source.current = null;
-    stream.current = null;
-    ctx.current = null;
-    ws.current?.send(JSON.stringify({ type: "audio_end" }));
-    setListening(false);
-  }
-
-  function send() {
-    if (!input.trim() || !ws.current) return;
-    setAnswer("");
-    ws.current.send(JSON.stringify({ type: "text", text: input }));
-    setInput("");
-  }
-
-  async function saveNote() {
-    if (!sessionId || !input.trim()) return;
-    const api = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    await fetch(`${api}/api/v1/sessions/${sessionId}/notes`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: input, note_type: "manual" }),
-    });
-    setNotes((value) => [input, ...value]);
-    setInput("");
-  }
-
-  async function loadSummary() {
-    if (!sessionId) return;
-    const api = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const response = await fetch(`${api}/api/v1/sessions/${sessionId}/summary`);
-    if (response.ok) setSummary(await response.json());
-  }
-
-  return (
-    <main className="main">
-      <div className="top">
-        <div>
-          <div className="eyebrow">Interview intelligence v2</div>
-          <h1 className="title">Real-time Copilot</h1>
-          <div className="subtitle">Live transcript → question boundary → resume/RAG retrieval → grounded answer → desktop overlay.</div>
-        </div>
-        <span className="pill"><Radio size={14} /> {connected ? "Connected" : "Offline"}</span>
-      </div>
-
-      {error && <div className="card" style={{ marginBottom: 18 }}>{error}</div>}
-
-      <div className="grid">
-        <section>
-          <div className="card hero">
-            <div>
-              <div className="eyebrow">Live transcription</div>
-              <h2>{transcript || "Your interviewer speech will appear here."}</h2>
-              {interim && <p className="muted">{interim}</p>}
-              <p className="subtitle">{autoStatus}. The answer is generated only after a detected question boundary and grounded against available resume/knowledge sources.</p>
-              {detectedQuestion && <div className="row" style={{ marginTop: 12 }}><span><strong>Detected:</strong> {detectedQuestion}</span></div>}
-            </div>
-            <div className="actions">
-              {!connected ? <button className="primary" onClick={connect}><Radio size={16} /> Connect Live</button> : <button className="secondary" onClick={() => { stopMic(); ws.current?.close(); }}><Square size={16} /> End Session</button>}
-              {connected && <button className={listening ? "primary" : "secondary"} onClick={listening ? stopMic : startMic}>{listening ? <MicOff size={16} /> : <Mic size={16} />} {listening ? "Stop microphone" : "Start microphone"}</button>}
-            </div>
-          </div>
-
-          <div className="card" style={{ marginTop: 20 }}>
-            <div className="eyebrow">Session notes</div>
-            <div className="composer"><input value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && send()} placeholder="Ask AI, add context, or type a note…" /><button className="primary" onClick={send}><Send size={16} /></button><button className="secondary" onClick={saveNote}><FileText size={16} /> Save note</button></div>
-            {notes.map((note, index) => <div className="row" key={`${note}-${index}`} style={{ marginTop: 10 }}><span>{note}</span></div>)}
-          </div>
-
-          <div className="card" style={{ marginTop: 20 }}>
-            <div className="eyebrow"><Brain size={14} /> Answer history</div>
-            {analysis.length === 0 ? <p className="muted">Detected interview questions and structured answers will appear here.</p> : analysis.map((item) => <div key={item.id} className="answer" style={{ marginTop: 14 }}><b>{item.question_type.replace("_", " ")} · {Math.round(item.confidence * 100)}% {item.confidence_label || "confidence"}</b><p>{item.transcript}</p><p>{item.answer}</p>{item.key_points.length > 0 && <ul>{item.key_points.map((point, index) => <li key={index}>{point}</li>)}</ul>}<small className="muted">Follow-up: {item.follow_up || "—"} · Sources: {item.sources.join(", ") || "none"}</small></div>)}
-          </div>
-        </section>
-
-        <aside>
-          <div className="card">
-            <div className="eyebrow">Current AI answer</div>
-            <div className="answer" style={{ minHeight: 180 }}>{answer || "AI answers will appear here."}</div>
-            {analysis[0] && <><div className="row"><span>Confidence</span><b>{Math.round(analysis[0].confidence * 100)}% · {analysis[0].confidence_label || "—"}</b></div><div className="row" style={{ marginTop: 8 }}><span>Detection</span><b>{Math.round((analysis[0].detection_confidence || 0) * 100)}%</b></div><div className="row" style={{ marginTop: 8 }}><span>Grounding</span><b>{Math.round((analysis[0].retrieval_strength || 0) * 100)}%</b></div><p className="muted" style={{ marginTop: 10 }}>Sources: {analysis[0].sources.join(", ") || "No matching source"}</p></>}
-          </div>
-
-          <div className="card" style={{ marginTop: 20 }}>
-            <div className="eyebrow">Session intelligence</div>
-            <div className="list"><div className="row"><span>Detected questions</span><b>{analysis.length}</b></div><div className="row"><span>RAG sources used</span><b>{new Set(analysis.flatMap((item) => item.sources)).size}</b></div><div className="row"><span>Saved notes</span><b>{notes.length}</b></div></div>
-            <button className="primary" style={{ marginTop: 16, width: "100%" }} onClick={loadSummary}><CheckCircle2 size={16} /> Generate session summary</button>
-          </div>
-
-          {summary && <div className="card" style={{ marginTop: 20 }}><div className="eyebrow">Session summary</div><h3>{summary.summary}</h3><b>Score: {summary.score}/100</b><p><strong>Strengths</strong></p><ul>{summary.strengths?.map((item, index) => <li key={index}>{item}</li>)}</ul><p><strong>Gaps</strong></p><ul>{summary.gaps?.map((item, index) => <li key={index}>{item}</li>)}</ul><p><strong>Next steps</strong></p><ul>{summary.next_steps?.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
-        </aside>
-      </div>
-
-      <button className="secondary" style={{ marginTop: 20 }} onClick={() => { window.location.href = "/"; }}><ArrowLeft size={16} /> Back to workspace</button>
-    </main>
-  );
+  return <main className="main">
+    <div className="top"><div><div className="eyebrow">Interview intelligence v2</div><h1 className="title">Real-time Copilot</h1><div className="subtitle">Live transcript → question boundary → resume/RAG retrieval → grounded answer → desktop overlay.</div></div><span className="pill"><Radio size={14} /> {connected ? "Connected" : "Offline"}</span></div>
+    {error && <div className="card" style={{ marginBottom: 18 }}>{error}</div>}
+    <div className="grid"><section>
+      <div className="card hero"><div><div className="eyebrow">Live transcription</div><h2>{transcript || "Your interviewer speech will appear here."}</h2>{interim && <p className="muted">{interim}</p>}<p className="subtitle">{autoStatus}. Answers are generated only after a detected question boundary and grounded against available resume/knowledge sources.</p>{detectedQuestion && <div className="row" style={{ marginTop: 12 }}><span><strong>Detected:</strong> {detectedQuestion}</span></div>}</div><div className="actions">{!connected ? <button className="primary" onClick={connect}><Radio size={16} /> Connect Live</button> : <button className="secondary" onClick={() => { stopMic(); ws.current?.close(); }}><Square size={16} /> End Session</button>}{connected && <button className={listening ? "primary" : "secondary"} onClick={listening ? stopMic : startMic}>{listening ? <MicOff size={16} /> : <Mic size={16} />} {listening ? "Stop microphone" : "Start microphone"}</button>}</div></div>
+      <div className="card" style={{ marginTop: 20 }}><div className="eyebrow"><Settings2 size={14} /> Auto-answer controls</div><div className="row" style={{ marginTop: 12 }}><span><strong>Automatic answers</strong><br /><small className="muted">Detect interviewer questions and generate answers automatically.</small></span><button className={autoAnswer ? "primary" : "secondary"} onClick={() => { const next = !autoAnswer; setAutoAnswer(next); sendSettings(next, answerMode); }}>{autoAnswer ? "ON" : "OFF"}</button></div><div style={{ marginTop: 14 }}><label className="muted" htmlFor="answer-mode">Answer style</label><select id="answer-mode" value={answerMode} onChange={(event) => { const next = event.target.value; setAnswerMode(next); sendSettings(autoAnswer, next); }} style={{ width: "100%", marginTop: 6, padding: 10, borderRadius: 10, background: "var(--panel, #fff)", color: "inherit", border: "1px solid rgba(127,133,0,.25)" }}><option value="concise">Concise — fast spoken response</option><option value="detailed">Detailed — implementation depth</option><option value="star">STAR — behavioral/project structure</option><option value="technical">Technical — architecture & trade-offs</option></select></div></div>
+      <div className="card" style={{ marginTop: 20 }}><div className="eyebrow">Session notes</div><div className="composer"><input value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && send()} placeholder="Ask AI, add context, or type a note…" /><button className="primary" onClick={send}><Send size={16} /></button><button className="secondary" onClick={saveNote}><FileText size={16} /> Save note</button></div>{notes.map((note, index) => <div className="row" key={`${note}-${index}`} style={{ marginTop: 10 }}><span>{note}</span></div>)}</div>
+      <div className="card" style={{ marginTop: 20 }}><div className="eyebrow"><Brain size={14} /> Answer history</div>{analysis.length === 0 ? <p className="muted">Detected interview questions and structured answers will appear here.</p> : analysis.map((item) => <div key={item.id} className="answer" style={{ marginTop: 14 }}><b>{item.question_type.replace("_", " ")} · {Math.round(item.confidence * 100)}% {item.confidence_label || "confidence"} · {item.answer_mode || "concise"}</b><p>{item.transcript}</p><p>{item.answer}</p>{item.key_points.length > 0 && <ul>{item.key_points.map((point, index) => <li key={index}>{point}</li>)}</ul>}<small className="muted">Follow-up: {item.follow_up || "—"} · Sources: {item.sources.join(", ") || "none"}</small></div>)}</div>
+    </section><aside>
+      <div className="card"><div className="eyebrow">Current AI answer</div><div className="answer" style={{ minHeight: 180 }}>{answer || "AI answers will appear here."}</div>{analysis[0] && <><div className="row"><span>Confidence</span><b>{Math.round(analysis[0].confidence * 100)}% · {analysis[0].confidence_label || "—"}</b></div><div className="row" style={{ marginTop: 8 }}><span>Detection</span><b>{Math.round((analysis[0].detection_confidence || 0) * 100)}%</b></div><div className="row" style={{ marginTop: 8 }}><span>Grounding</span><b>{Math.round((analysis[0].retrieval_strength || 0) * 100)}%</b></div><p className="muted" style={{ marginTop: 10 }}>Sources: {analysis[0].sources.join(", ") || "No matching source"}</p></>}</div>
+      <div className="card" style={{ marginTop: 20 }}><div className="eyebrow">Session intelligence</div><div className="list"><div className="row"><span>Detected questions</span><b>{analysis.length}</b></div><div className="row"><span>RAG sources used</span><b>{new Set(analysis.flatMap((item) => item.sources)).size}</b></div><div className="row"><span>Saved notes</span><b>{notes.length}</b></div></div><button className="primary" style={{ marginTop: 16, width: "100%" }} onClick={loadSummary}><CheckCircle2 size={16} /> Generate session summary</button></div>
+      {summary && <div className="card" style={{ marginTop: 20 }}><div className="eyebrow">Session summary</div><h3>{summary.summary}</h3><b>Score: {summary.score}/100</b><p><strong>Strengths</strong></p><ul>{summary.strengths?.map((item, index) => <li key={index}>{item}</li>)}</ul><p><strong>Gaps</strong></p><ul>{summary.gaps?.map((item, index) => <li key={index}>{item}</li>)}</ul><p><strong>Next steps</strong></p><ul>{summary.next_steps?.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+    </aside></div><button className="secondary" style={{ marginTop: 20 }} onClick={() => { window.location.href = "/"; }}><ArrowLeft size={16} /> Back to workspace</button>
+  </main>;
 }
