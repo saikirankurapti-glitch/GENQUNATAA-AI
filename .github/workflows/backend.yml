@@ -16,6 +16,8 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    env:
+      PYTHONPATH: .
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,4 +27,4 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - run: pip install -r requirements.txt
       - run: pip install pytest httpx
-      - run: pytest -q
+      - run: python -m pytest -q
