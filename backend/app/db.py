@@ -25,8 +25,8 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db() -> None:
     from .db_models import (
-        AuthSessionRecord, Document, DocumentChunk, InterviewQuestion, MessageRecord,
-        ResumeProfile, SessionNote, SessionRecord, UserRecord,
+        AuditLogRecord, AuthSessionRecord, Document, DocumentChunk, InterviewQuestion,
+        MessageRecord, ResumeProfile, SessionNote, SessionRecord, UserRecord,
     )  # noqa: F401
 
     async with engine.begin() as conn:
@@ -46,3 +46,6 @@ async def init_db() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_auth_sessions_user_id ON auth_sessions(user_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_auth_sessions_expires_at ON auth_sessions(expires_at)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_auth_sessions_revoked_at ON auth_sessions(revoked_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_actor_user_id ON audit_logs(actor_user_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_created_at ON audit_logs(created_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_logs_action ON audit_logs(action)"))
