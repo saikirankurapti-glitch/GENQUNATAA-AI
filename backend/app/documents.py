@@ -9,8 +9,9 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .auth import current_user
 from .db import get_db
-from .db_models import Document, DocumentChunk
+from .db_models import Document, DocumentChunk, UserRecord
 from .embeddings import EmbeddingService, serialize_embedding
 from .rag import retriever
 
@@ -48,7 +49,7 @@ def chunk_text(text: str) -> list[str]:
 
 
 @router.post("/upload", response_model=DocumentOut)
-async def upload_document(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)) -> DocumentOut:
+async def upload_document(file: UploadFile = File(...), db: AsyncSession = Depends(get_db), user: UserRecord = Depends(current_user)) -> DocumentOut:
     if file.content_type not in _ALLOWED:
         raise HTTPException(status_code=415, detail="Supported types: PDF, TXT, Markdown")
     data = await file.read()
@@ -59,7 +60,7 @@ async def upload_document(file: UploadFile = File(...), db: AsyncSession = Depen
         raise HTTPException(status_code=422, detail="No readable text found in document")
 
     chunks = chunk_text(text)
-    document = Document(filename=file.filename or "document", content_type=file.content_type, content=text)
+    document = Document(user_id=user.id, filename=file.filename or "document", content_type=file.content_type, content=text)
     db.add(document)
     await db.flush()
     for index, chunk in enumerate(chunks):
@@ -69,26 +70,20 @@ async def upload_document(file: UploadFile = File(...), db: AsyncSession = Depen
                 vector = await _embeddings.embed(chunk)
             except Exception:
                 vector = None
-        db.add(DocumentChunk(
-            document_id=document.id,
-            chunk_index=index,
-            content=chunk,
-            embedding=serialize_embedding(vector) if vector else None,
-            embedding_vector=vector or None,
-        ))
+        db.add(DocumentChunk(document_id=document.id, chunk_index=index, content=chunk, embedding=serialize_embedding(vector) if vector else None, embedding_vector=vector or None))
     await db.commit()
     await db.refresh(document)
     return DocumentOut(id=document.id, filename=document.filename, content_type=document.content_type, characters=len(text), chunks=len(chunks))
 
 
 @router.get("", response_model=list[DocumentOut])
-async def list_documents(db: AsyncSession = Depends(get_db)) -> list[DocumentOut]:
-    result = await db.execute(select(Document).order_by(Document.created_at.desc()))
+async def list_documents(db: AsyncSession = Depends(get_db), user: UserRecord = Depends(current_user)) -> list[DocumentOut]:
+    result = await db.execute(select(Document).where(Document.user_id == user.id).order_by(Document.created_at.desc()))
     return [DocumentOut(id=d.id, filename=d.filename, content_type=d.content_type, characters=len(d.content), chunks=len(d.chunks)) for d in result.scalars().all()]
 
 
 @router.post("/search")
-async def search_documents(payload: SearchRequest, db: AsyncSession = Depends(get_db)) -> dict:
+async def search_documents(payload: SearchRequest, db: AsyncSession = Depends(get_db), user: UserRecord = Depends(current_user)) -> dict:
     limit = max(1, min(payload.limit, 20))
-    results = await retriever.retrieve(db, payload.query, limit=limit)
+    results = await retriever.retrieve(db, payload.query, limit=limit, user_id=user.id)
     return {"query": payload.query, "results": results}
