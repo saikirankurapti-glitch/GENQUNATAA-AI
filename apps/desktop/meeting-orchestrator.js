@@ -62,10 +62,14 @@ class MeetingOrchestrator {
         body: JSON.stringify({ title: sessionTitle, mode: 'copilot' }),
       });
       const data = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        await this.stop(false);
+        this.emit({ active: false, status: 'auth_required', error: 'Your GenQuantaa session has expired. Please sign in again.' });
+        return this.state;
+      }
       if (!response.ok) throw new Error(data.detail || `Session creation failed (${response.status})`);
 
       this.emit({ session_id: data.id, status: 'session_ready' });
-
       const liveUrl = `${this.webUrl}/live?session=${encodeURIComponent(data.id)}&provider=${encodeURIComponent(provider.id)}&auto_answer=${autoAnswer ? '1' : '0'}&answer_mode=${encodeURIComponent(answerMode)}`;
       await this.mainWindow.loadURL(liveUrl);
       if (openMeeting) await shell.openExternal(meetingUrl);
