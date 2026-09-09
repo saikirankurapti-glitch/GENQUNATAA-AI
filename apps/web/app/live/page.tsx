@@ -1,7 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Brain, CheckCircle2, FileText, Mic, MicOff, Radio, Send, Settings2, Square } from "lucide-react";
 
 type SourceDetail = { filename: string; score: number; snippet: string };
@@ -13,13 +12,11 @@ declare global { interface Window { genquantaa?: { publishCopilotUpdate?: (paylo
 function pcm16(input: Float32Array) { const pcm = new Int16Array(input.length); for (let i = 0; i < input.length; i += 1) { const x = Math.max(-1, Math.min(1, input[i])); pcm[i] = x < 0 ? x * 0x8000 : x * 0x7fff; } const bytes = new Uint8Array(pcm.buffer); let binary = ""; for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + 0x8000, bytes.length))); return btoa(binary); }
 
 export default function LivePage() {
-  const params = useSearchParams();
   const ws = useRef<WebSocket | null>(null); const ctx = useRef<AudioContext | null>(null); const processor = useRef<ScriptProcessorNode | null>(null); const source = useRef<MediaStreamAudioSourceNode | null>(null); const stream = useRef<MediaStream | null>(null);
   const [connected, setConnected] = useState(false); const [listening, setListening] = useState(false); const [input, setInput] = useState(""); const [answer, setAnswer] = useState(""); const [transcript, setTranscript] = useState(""); const [interim, setInterim] = useState(""); const [detectedQuestion, setDetectedQuestion] = useState(""); const [autoStatus, setAutoStatus] = useState("Waiting for a question"); const [error, setError] = useState(""); const [sessionId, setSessionId] = useState(""); const [analysis, setAnalysis] = useState<Analysis[]>([]); const [notes, setNotes] = useState<string[]>([]); const [summary, setSummary] = useState<Summary | null>(null);
-  const [autoAnswer, setAutoAnswer] = useState(params.get("auto_answer") !== "0"); const [answerMode, setAnswerMode] = useState(params.get("answer_mode") || "concise");
-  const provider = params.get("provider");
-  const orchestratedSession = params.get("session");
+  const [autoAnswer, setAutoAnswer] = useState(true); const [answerMode, setAnswerMode] = useState("concise"); const [provider, setProvider] = useState(""); const [orchestratedSession, setOrchestratedSession] = useState("");
 
+  useEffect(() => { const params = new URLSearchParams(window.location.search); setAutoAnswer(params.get("auto_answer") !== "0"); setAnswerMode(params.get("answer_mode") || "concise"); setProvider(params.get("provider") || ""); setOrchestratedSession(params.get("session") || ""); }, []);
   function publishToDesktop(payload: unknown) { void window.genquantaa?.publishCopilotUpdate?.(payload); }
   function sendSettings(nextAutoAnswer = autoAnswer, nextMode = answerMode) { if (ws.current?.readyState === WebSocket.OPEN) ws.current.send(JSON.stringify({ type: "settings", auto_answer: nextAutoAnswer, answer_mode: nextMode })); }
 
