@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import hmac
 import os
 from uuid import UUID
@@ -9,11 +10,11 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import SessionLocal, get_db
-from .db_models import UserRecord
+from .db_models import AuthSessionRecord, UserRecord
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
@@ -41,10 +42,14 @@ def _needs_password_rehash(stored: str) -> bool:
         return False
 
 
-def _token(user_id: UUID, expires: datetime) -> str:
+def _token(user_id: UUID, expires: datetime, secret: str | None = None) -> str:
     payload = f"{user_id}:{int(expires.timestamp())}"
-    signature = hmac.new(_SECRET.encode(), payload.encode(), "sha256").hexdigest()
+    signature = hmac.new((secret or _SECRET).encode(), payload.encode(), "sha256").hexdigest()
     return f"{payload}:{signature}"
+
+
+def _token_hash(token: str) -> str:
+    return sha256(token.encode()).hexdigest()
 
 
 def _decode(token: str) -> tuple[UUID, datetime] | None:
@@ -60,6 +65,21 @@ def _decode(token: str) -> tuple[UUID, datetime] | None:
         return UUID(user_text), expiry
     except (ValueError, TypeError):
         return None
+
+
+async def _session_for_token(db: AsyncSession, token: str) -> tuple[AuthSessionRecord, UserRecord] | None:
+    decoded = _decode(token)
+    if not decoded:
+        return None
+    session = await db.scalar(select(AuthSessionRecord).where(AuthSessionRecord.token_hash == _token_hash(token)))
+    now = datetime.now(timezone.utc)
+    if not session or session.revoked_at is not None or session.expires_at <= now:
+        return None
+    user = await db.get(UserRecord, session.user_id)
+    if not user or not user.is_active:
+        return None
+    session.last_seen_at = now
+    return session, user
 
 
 class RegisterRequest(BaseModel):
@@ -81,26 +101,26 @@ class UserOut(BaseModel):
 
 async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> UserRecord:
     token = request.cookies.get(_SESSION_COOKIE)
-    decoded = _decode(token) if token else None
-    if not decoded:
+    if not token:
         raise HTTPException(status_code=401, detail="Authentication required")
-    user_id, _ = decoded
-    user = await db.get(UserRecord, user_id)
-    if not user or not user.is_active:
-        raise HTTPException(status_code=401, detail="Invalid session")
+    authenticated = await _session_for_token(db, token)
+    if not authenticated:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    _, user = authenticated
+    await db.commit()
     return user
 
 
 async def websocket_user(websocket: WebSocket) -> UserRecord | None:
     token = websocket.cookies.get(_SESSION_COOKIE)
-    decoded = _decode(token) if token else None
-    if not decoded:
+    if not token:
         return None
-    user_id, _ = decoded
     async with SessionLocal() as db:
-        user = await db.get(UserRecord, user_id)
-        if not user or not user.is_active:
+        authenticated = await _session_for_token(db, token)
+        if not authenticated:
             return None
+        _, user = authenticated
+        await db.commit()
         return user
 
 
@@ -108,11 +128,13 @@ def public_user(user: UserRecord) -> UserOut:
     return UserOut(id=user.id, email=user.email, name=user.name)
 
 
-def set_session(response: Response, user_id: UUID) -> None:
+def set_session(response: Response, user_id: UUID, db: AsyncSession) -> None:
     expires = datetime.now(timezone.utc) + _SESSION_TTL
+    token = _token(user_id, expires)
+    db.add(AuthSessionRecord(user_id=user_id, token_hash=_token_hash(token), expires_at=expires))
     response.set_cookie(
         _SESSION_COOKIE,
-        _token(user_id, expires),
+        token,
         max_age=int(_SESSION_TTL.total_seconds()),
         httponly=True,
         secure=os.getenv("APP_ENV", "development").lower() in {"production", "prod"},
@@ -128,9 +150,10 @@ async def register(payload: RegisterRequest, response: Response, db: AsyncSessio
         raise HTTPException(status_code=409, detail="Email is already registered")
     user = UserRecord(email=email, name=payload.name.strip() or email.split("@", 1)[0], password_hash=_hash_password(payload.password))
     db.add(user)
+    await db.flush()
+    set_session(response, user.id, db)
     await db.commit()
     await db.refresh(user)
-    set_session(response, user.id)
     return public_user(user)
 
 
@@ -143,13 +166,21 @@ async def login(payload: LoginRequest, response: Response, db: AsyncSession = De
     if _needs_password_rehash(user.password_hash):
         user.password_hash = _hash_password(payload.password)
     user.last_login_at = datetime.now(timezone.utc)
+    set_session(response, user.id, db)
     await db.commit()
-    set_session(response, user.id)
     return public_user(user)
 
 
 @router.post("/logout")
-async def logout(response: Response) -> dict[str, str]:
+async def logout(request: Request, response: Response, db: AsyncSession = Depends(get_db)) -> dict[str, str]:
+    token = request.cookies.get(_SESSION_COOKIE)
+    if token:
+        await db.execute(
+            update(AuthSessionRecord)
+            .where(AuthSessionRecord.token_hash == _token_hash(token), AuthSessionRecord.revoked_at.is_(None))
+            .values(revoked_at=datetime.now(timezone.utc))
+        )
+        await db.commit()
     response.delete_cookie(_SESSION_COOKIE, path="/")
     return {"status": "logged_out"}
 
