@@ -3,17 +3,22 @@ const path = require('path');
 const { MeetingOrchestrator, detectMeetingProvider, PROVIDERS } = require('./meeting-orchestrator');
 const { ScreenContextService } = require('./screen-context');
 const WEB_URL = process.env.GENQUNTAA_WEB_URL || 'http://localhost:3000'; const API_URL = process.env.GENQUNTAA_API_URL || 'http://localhost:8000';
-let mainWindow; let overlayWindow; let meetingOrchestrator; let screenContext;
+let mainWindow; let overlayWindow; let meetingOrchestrator; let screenContext; let redirectingToAuth = false;
 function createMainWindow() { mainWindow = new BrowserWindow({ width: 1280, height: 820, minWidth: 960, minHeight: 640, title: 'GenQuantaa AI', backgroundColor: '#0b0d0c', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } }); mainWindow.loadURL(WEB_URL); }
 function createOverlay() { const { width } = screen.getPrimaryDisplay().workAreaSize; overlayWindow = new BrowserWindow({ width: 430, height: 280, x: Math.max(16, width - 450), y: 24, frame: false, transparent: true, resizable: false, alwaysOnTop: true, skipTaskbar: true, title: 'GenQuantaa AI Copilot', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } }); overlayWindow.loadFile(path.join(__dirname, 'overlay.html')); overlayWindow.setAlwaysOnTop(true, 'floating'); }
-async function getAuthCookie() {
-  if (!mainWindow || mainWindow.isDestroyed()) return null;
+async function getAuthCookie() { if (!mainWindow || mainWindow.isDestroyed()) return null; try { const cookies = await mainWindow.webContents.session.cookies.get({ url: API_URL, name: 'genquantaa_session' }); const cookie = cookies.find((item) => item.name === 'genquantaa_session' && item.value); return cookie ? `${cookie.name}=${cookie.value}` : null; } catch { return null; } }
+async function clearAuthCookie() { try { await mainWindow?.webContents.session.cookies.remove(API_URL, 'genquantaa_session'); } catch { /* session may already be unavailable */ } }
+async function requireAuthentication() {
+  if (redirectingToAuth) return;
+  redirectingToAuth = true;
   try {
-    const cookies = await mainWindow.webContents.session.cookies.get({ url: API_URL, name: 'genquantaa_session' });
-    const cookie = cookies.find((item) => item.name === 'genquantaa_session' && item.value);
-    return cookie ? `${cookie.name}=${cookie.value}` : null;
-  } catch {
-    return null;
+    meetingOrchestrator?.stop(false);
+    screenContext?.stop();
+    await clearAuthCookie();
+    if (mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(`${WEB_URL}/auth`);
+    overlayWindow?.hide();
+  } finally {
+    redirectingToAuth = false;
   }
 }
 function broadcastMeetingState(state) { if (!overlayWindow || overlayWindow.isDestroyed()) return; overlayWindow.webContents.send('meeting-state', state); if (state.active && state.status === 'running') overlayWindow.showInactive(); }
@@ -31,7 +36,7 @@ app.whenReady().then(() => {
   ipcMain.handle('screen-context-sensitivity', (_event, threshold) => { try { return screenContext.setDiffThreshold(threshold); } catch (error) { return { active: screenContext.active, status: 'error', error: error instanceof Error ? error.message : 'Could not update sensitivity' }; } });
   ipcMain.handle('screen-context-continuous-start', async (_event, intervalMs) => { try { return screenContext.startContinuous(intervalMs); } catch (error) { return { active: screenContext.active, status: 'error', error: error instanceof Error ? error.message : 'Could not enable continuous context' }; } });
   ipcMain.handle('screen-context-continuous-stop', () => { screenContext.stopContinuous(); return screenContext.getState(); }); ipcMain.handle('screen-context-stop', () => screenContext.stop()); ipcMain.handle('screen-context-state', () => screenContext.getState());
-  createMainWindow(); createOverlay(); meetingOrchestrator = new MeetingOrchestrator({ mainWindow, webUrl: WEB_URL, apiUrl: API_URL, authCookieProvider: getAuthCookie, onState: broadcastMeetingState }); screenContext = new ScreenContextService({ onState: broadcastScreenState, apiUrl: API_URL, authCookieProvider: getAuthCookie });
+  createMainWindow(); createOverlay(); meetingOrchestrator = new MeetingOrchestrator({ mainWindow, webUrl: WEB_URL, apiUrl: API_URL, authCookieProvider: getAuthCookie, onAuthRequired: requireAuthentication, onState: broadcastMeetingState }); screenContext = new ScreenContextService({ onState: broadcastScreenState, apiUrl: API_URL, authCookieProvider: getAuthCookie, onAuthRequired: requireAuthentication });
   app.on('before-quit', () => { meetingOrchestrator?.stop(false); screenContext?.stop(); }); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); });
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
