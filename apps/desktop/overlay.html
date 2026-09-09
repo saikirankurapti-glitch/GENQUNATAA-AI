@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'self';" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GenQuantaa Copilot</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,sans-serif;color:#f5f6ef;background:transparent}.panel{margin:10px;padding:16px 18px;border:1px solid rgba(255,255,255,.12);border-radius:18px;background:rgba(12,15,14,.94);box-shadow:0 18px 50px rgba(0,0,0,.35);-webkit-app-region:drag}.head{display:flex;align-items:center;justify-content:space-between}.brand{font-weight:800;letter-spacing:.02em}.status{font-size:11px;color:#b9c1ba}.answer{margin-top:14px;line-height:1.45;font-size:14px;color:#e4e8df;min-height:52px}.actions{display:flex;gap:8px;margin-top:10px;-webkit-app-region:no-drag}button{border:0;border-radius:10px;padding:8px 11px;background:#e8ef49;color:#11140f;font-weight:700;cursor:pointer}button.secondary{background:#252b28;color:#dfe4db;border:1px solid #3a423e}
+</style></head>
+<body><div class="panel"><div class="head"><div class="brand">GENQUNTAA AI</div><div class="status" id="status">Desktop Copilot</div></div><div class="answer" id="answer">Ready. Open Live Copilot to start a session.</div><div class="actions"><button id="live">Open Live</button><button class="secondary" id="workspace">Workspace</button><button class="secondary" id="hide">Hide</button></div></div><script>
+document.getElementById('live').onclick=()=>window.genquantaa.openLive();
+document.getElementById('workspace').onclick=()=>window.genquantaa.openWorkspace();
+document.getElementById('hide').onclick=()=>window.genquantaa.toggleOverlay();
+</script></body></html>
