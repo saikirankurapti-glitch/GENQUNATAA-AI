@@ -1,0 +1,14 @@
+{
+  "name": "genquantaa-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GenQuantaa AI desktop copilot shell",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "dependencies": {
+    "electron": "^38.1.0"
+  }
+}
