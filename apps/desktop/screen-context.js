@@ -15,8 +15,8 @@ function normalizeSource(source) {
 }
 
 class ScreenContextService {
-  constructor({ onState, apiUrl }) {
-    this.onState = onState; this.apiUrl = apiUrl; this.active = false; this.selectedSource = null; this.sources = [];
+  constructor({ onState, apiUrl, authCookieProvider }) {
+    this.onState = onState; this.apiUrl = apiUrl; this.authCookieProvider = authCookieProvider; this.active = false; this.selectedSource = null; this.sources = [];
     this.lastCapture = null; this.lastAnalysis = null; this.continuous = false; this.intervalMs = DEFAULT_INTERVAL_MS; this.timer = null; this.analyzing = false;
     this.adaptive = true; this.diffThreshold = DEFAULT_DIFF_THRESHOLD; this.previousFrame = null; this.lastChangeAt = null; this.changeScore = null; this.skippedUnchangedFrames = 0;
   }
@@ -49,13 +49,19 @@ class ScreenContextService {
     const image = selected.thumbnail; if (!image || image.isEmpty()) throw new Error('Could not capture the selected source.');
     return { png: image.toPNG(), bitmap: image.toBitmap() };
   }
+  async authenticatedFetch(url, options = {}) {
+    const cookie = await this.authCookieProvider?.();
+    if (!cookie) throw new Error('Please sign in to GenQuantaa AI before analyzing visual context.');
+    const headers = { ...(options.headers || {}), Cookie: cookie };
+    return fetch(url, { ...options, headers });
+  }
   async analyze(capture) {
     if (!this.active || !this.selectedSource) throw new Error('Select a screen or window before analyzing visual context.');
     if (this.analyzing) return this.emit({ status: 'analyzing' });
     this.analyzing = true; this.emit({ status: 'capturing' });
     try {
       const form = new FormData(); form.append('file', new Blob([capture.png], { type: 'image/png' }), 'screen-context.png');
-      const response = await fetch(`${this.apiUrl}/api/v1/visual/analyze`, { method: 'POST', body: form });
+      const response = await this.authenticatedFetch(`${this.apiUrl}/api/v1/visual/analyze`, { method: 'POST', body: form });
       const payload = await response.json().catch(() => ({})); if (!response.ok) throw new Error(payload.detail || `Visual analysis failed (${response.status})`);
       this.lastCapture = new Date().toISOString(); this.lastAnalysis = { analyzed_at: this.lastCapture, analysis: payload.analysis }; return this.emit({ status: 'analyzed' });
     } finally { this.analyzing = false; this.emit(); }
