@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,7 +13,7 @@ class Retriever:
     def __init__(self) -> None:
         self.embeddings = EmbeddingService()
 
-    async def retrieve(self, db: AsyncSession, query: str, limit: int = 5) -> list[dict[str, str | float]]:
+    async def retrieve(self, db: AsyncSession, query: str, limit: int = 5, user_id: UUID | None = None) -> list[dict[str, str | float]]:
         limit = max(1, min(limit, 20))
         query_vector: list[float] = []
         if self.embeddings.api_key:
@@ -20,21 +22,25 @@ class Retriever:
             except Exception:
                 query_vector = []
 
+        owner_filter = Document.user_id == user_id if user_id is not None else None
         if query_vector and db.bind is not None and db.bind.dialect.name == "postgresql":
             distance = DocumentChunk.embedding_vector.cosine_distance(query_vector)
-            result = await db.execute(
+            statement = (
                 select(DocumentChunk, Document.filename, distance.label("distance"))
                 .join(Document, Document.id == DocumentChunk.document_id)
                 .where(DocumentChunk.embedding_vector.is_not(None))
                 .order_by(distance)
                 .limit(limit)
             )
-            return [
-                {"content": chunk.content, "filename": filename, "score": round(max(0.0, 1.0 - float(distance_value)), 4)}
-                for chunk, filename, distance_value in result.all()
-            ]
+            if owner_filter is not None:
+                statement = statement.where(owner_filter)
+            result = await db.execute(statement)
+            return [{"content": chunk.content, "filename": filename, "score": round(max(0.0, 1.0 - float(distance_value)), 4)} for chunk, filename, distance_value in result.all()]
 
-        result = await db.execute(select(DocumentChunk, Document.filename).join(Document, Document.id == DocumentChunk.document_id))
+        statement = select(DocumentChunk, Document.filename).join(Document, Document.id == DocumentChunk.document_id)
+        if owner_filter is not None:
+            statement = statement.where(owner_filter)
+        result = await db.execute(statement)
         rows = result.all()
         if not rows:
             return []
@@ -48,7 +54,6 @@ class Retriever:
             score = semantic + min(lexical * 0.02, 0.25)
             if score > 0:
                 scored.append((score, chunk, filename))
-
         scored.sort(key=lambda item: item[0], reverse=True)
         return [{"content": chunk.content, "filename": filename, "score": round(score, 4)} for score, chunk, filename in scored[:limit]]
 
