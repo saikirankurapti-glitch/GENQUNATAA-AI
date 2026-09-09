@@ -7,12 +7,12 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from sqlalchemy import select
 
 from .config import get_settings
 from .db import SessionLocal
 from .db_models import SessionRecord
 from .intelligence import interview_intelligence
+from .question_boundary import QuestionBoundaryDetector
 
 router = APIRouter(prefix="/api/v1/realtime")
 
@@ -43,6 +43,7 @@ async def realtime_socket(websocket: WebSocket) -> None:
         )
 
         session_id: UUID | None = None
+        detector = QuestionBoundaryDetector()
         async with client.aio.live.connect(model=settings.gemini_model, config=config) as session:
             async def receive_client() -> None:
                 nonlocal session_id
@@ -65,6 +66,7 @@ async def realtime_socket(websocket: WebSocket) -> None:
                                 await db.commit()
                                 await db.refresh(record)
                                 session_id = record.id
+                        detector.reset()
                         await websocket.send_json({"type": "session", "session_id": str(session_id)})
                     elif kind == "text":
                         text = str(message.get("text", "")).strip()
@@ -78,10 +80,37 @@ async def realtime_socket(websocket: WebSocket) -> None:
                         data = base64.b64decode(message.get("data", ""))
                         if data:
                             await session.send_realtime_input(
-                                audio=types.Blob(data=data, mime_type=message.get("mime_type", "audio/pcm;rate=16000"))
+                                audio=types.Blob(
+                                    data=data,
+                                    mime_type=message.get("mime_type", "audio/pcm;rate=16000"),
+                                )
                             )
                     elif kind == "audio_end":
                         await session.send_realtime_input(audio_stream_end=True)
+
+            async def analyze_and_send(boundary: Any) -> None:
+                if not session_id:
+                    return
+                try:
+                    await websocket.send_json({
+                        "type": "question_detected",
+                        "data": {
+                            "text": boundary.text,
+                            "confidence": boundary.confidence,
+                            "reason": boundary.reason,
+                        },
+                    })
+                    async with SessionLocal() as db:
+                        result = await interview_intelligence.analyze_question(
+                            db,
+                            session_id,
+                            boundary.text,
+                            detection_confidence=boundary.confidence,
+                            detection_reason=boundary.reason,
+                        )
+                    await websocket.send_json({"type": "question_analysis", "data": result})
+                except Exception as exc:
+                    await websocket.send_json({"type": "intelligence_error", "message": str(exc)})
 
             async def send_model() -> None:
                 async for response in session.receive():
@@ -93,28 +122,27 @@ async def realtime_socket(websocket: WebSocket) -> None:
                         final = getattr(server, "input_transcription", None)
                         if final and getattr(final, "text", None):
                             transcript = final.text.strip()
-                            await websocket.send_json({"type": "transcript", "text": transcript})
-                            if session_id and interview_intelligence.looks_like_question(transcript):
-                                asyncio.create_task(analyze_and_send(transcript))
+                            if transcript:
+                                detector.add(transcript)
+                                await websocket.send_json({"type": "transcript", "text": transcript})
+                                # Explicit punctuation can close a question before turnComplete.
+                                if "?" in transcript:
+                                    boundary = detector.flush()
+                                    if boundary:
+                                        asyncio.create_task(analyze_and_send(boundary))
                         output = getattr(server, "output_transcription", None)
                         if output and getattr(output, "text", None):
                             await websocket.send_json({"type": "text", "text": output.text})
                         if getattr(server, "interrupted", False):
+                            detector.reset()
                             await websocket.send_json({"type": "interrupted"})
                         if getattr(server, "turn_complete", False):
+                            boundary = detector.flush()
+                            if boundary:
+                                asyncio.create_task(analyze_and_send(boundary))
                             await websocket.send_json({"type": "turn_complete"})
                     if response.text:
                         await websocket.send_json({"type": "text", "text": response.text})
-
-            async def analyze_and_send(transcript: str) -> None:
-                if not session_id:
-                    return
-                try:
-                    async with SessionLocal() as db:
-                        result = await interview_intelligence.analyze_question(db, session_id, transcript)
-                    await websocket.send_json({"type": "question_analysis", "data": result})
-                except Exception as exc:
-                    await websocket.send_json({"type": "intelligence_error", "message": str(exc)})
 
             await asyncio.gather(receive_client(), send_model())
     except WebSocketDisconnect:
