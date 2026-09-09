@@ -11,6 +11,7 @@ declare global {
     onMeetingState?: (callback: (state: unknown) => void) => () => void;
     getScreenContextSources?: () => Promise<unknown>;
     startScreenContext?: (sourceId: string) => Promise<unknown>;
+    analyzeScreenContext?: () => Promise<unknown>;
     stopScreenContext?: () => Promise<unknown>;
     getScreenContextState?: () => Promise<unknown>;
     onScreenContextState?: (callback: (state: unknown) => void) => () => void;
