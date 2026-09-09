@@ -3,12 +3,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api import router
 from .config import get_settings
+from .realtime import router as realtime_router
 
 settings = get_settings()
 
 app = FastAPI(
     title="GenQuantaa AI API",
-    version="0.2.0",
+    version="0.3.0",
     description="Backend API for the GenQuantaa AI copilot.",
 )
 
@@ -21,6 +22,7 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(realtime_router)
 
 
 @app.get("/health")
