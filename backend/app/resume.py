@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_db
-from .db_models import Document, ResumeProfile
+from .db_models import Document, DocumentChunk, ResumeProfile
 from .documents import _MAX_BYTES, _ALLOWED, chunk_text, extract_text
 from .embeddings import EmbeddingService, serialize_embedding
 
@@ -36,7 +36,8 @@ KNOWN_SKILLS = {
 
 def parse_resume(text: str) -> tuple[str | None, str | None, list[str], float | None]:
     email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", text)
-    name = next((line.strip() for line in text.splitlines() if 2 <= len(line.split()) <= 4 and not re.search(r"[@:]", line)), None)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    name = next((line for line in lines[:8] if 2 <= len(line.split()) <= 4 and not re.search(r"[@:]|resume|curriculum vitae", line, re.I)), None)
     lower = text.lower()
     skills = sorted(skill for skill in KNOWN_SKILLS if skill in lower)
     years = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)\s*\+?\s*years?", lower)]
@@ -58,8 +59,8 @@ async def upload_resume(file: UploadFile = File(...), db: AsyncSession = Depends
     document = Document(filename=file.filename or "resume", content_type=file.content_type, content=text)
     db.add(document)
     await db.flush()
-    profile = ResumeProfile(document_id=document.id, name=name, email=email, skills=", ".join(skills), experience_years=years)
-    db.add(profile)
+    db.add(ResumeProfile(document_id=document.id, name=name, email=email, skills=", ".join(skills), experience_years=years))
+
     for index, chunk in enumerate(chunk_text(text)):
         vector = []
         if embedding_service.api_key:
@@ -67,7 +68,7 @@ async def upload_resume(file: UploadFile = File(...), db: AsyncSession = Depends
                 vector = await embedding_service.embed(chunk)
             except Exception:
                 vector = []
-        db.add(__import__("app.db_models", fromlist=["DocumentChunk"]).DocumentChunk(document_id=document.id, chunk_index=index, content=chunk, embedding=serialize_embedding(vector) if vector else None))
+        db.add(DocumentChunk(document_id=document.id, chunk_index=index, content=chunk, embedding=serialize_embedding(vector) if vector else None))
     await db.commit()
     return ResumeOut(id=document.id, filename=document.filename, name=name, email=email, skills=skills, experience_years=years)
 
