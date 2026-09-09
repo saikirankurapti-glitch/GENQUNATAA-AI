@@ -4,10 +4,15 @@ import asyncio
 import base64
 import json
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
 
 from .config import get_settings
+from .db import SessionLocal
+from .db_models import SessionRecord
+from .intelligence import interview_intelligence
 
 router = APIRouter(prefix="/api/v1/realtime")
 
@@ -28,21 +33,40 @@ async def realtime_socket(websocket: WebSocket) -> None:
         client = genai.Client(api_key=settings.gemini_api_key)
         config = types.LiveConnectConfig(
             response_modalities=["TEXT"],
-            input_audio_transcription=types.AudioTranscriptionConfig(),
+            input_audio_transcription=types.AudioTranscriptionConfig(mode="SMART"),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             system_instruction=(
                 "You are GenQuantaa AI, a concise real-time interview copilot. "
-                "Transcribe the speaker and provide direct, structured interview answers. "
-                "Do not invent resume facts."
+                "Listen for interview questions and provide direct, structured answers. "
+                "Do not invent resume facts. The server separately runs interview intelligence."
             ),
         )
 
+        session_id: UUID | None = None
         async with client.aio.live.connect(model=settings.gemini_model, config=config) as session:
             async def receive_client() -> None:
+                nonlocal session_id
                 while True:
                     message: dict[str, Any] = json.loads(await websocket.receive_text())
                     kind = message.get("type")
-                    if kind == "text":
+                    if kind == "start":
+                        raw_id = message.get("session_id")
+                        async with SessionLocal() as db:
+                            if raw_id:
+                                try:
+                                    candidate = UUID(str(raw_id))
+                                    if await db.get(SessionRecord, candidate):
+                                        session_id = candidate
+                                except ValueError:
+                                    pass
+                            if session_id is None:
+                                record = SessionRecord(title="Live interview", mode="live")
+                                db.add(record)
+                                await db.commit()
+                                await db.refresh(record)
+                                session_id = record.id
+                        await websocket.send_json({"type": "session", "session_id": str(session_id)})
+                    elif kind == "text":
                         text = str(message.get("text", "")).strip()
                         if text:
                             await session.send_realtime_input(text=text)
@@ -68,7 +92,10 @@ async def realtime_socket(websocket: WebSocket) -> None:
                             await websocket.send_json({"type": "transcript_interim", "text": interim.text})
                         final = getattr(server, "input_transcription", None)
                         if final and getattr(final, "text", None):
-                            await websocket.send_json({"type": "transcript", "text": final.text})
+                            transcript = final.text.strip()
+                            await websocket.send_json({"type": "transcript", "text": transcript})
+                            if session_id and interview_intelligence.looks_like_question(transcript):
+                                asyncio.create_task(analyze_and_send(transcript))
                         output = getattr(server, "output_transcription", None)
                         if output and getattr(output, "text", None):
                             await websocket.send_json({"type": "text", "text": output.text})
@@ -78,6 +105,16 @@ async def realtime_socket(websocket: WebSocket) -> None:
                             await websocket.send_json({"type": "turn_complete"})
                     if response.text:
                         await websocket.send_json({"type": "text", "text": response.text})
+
+            async def analyze_and_send(transcript: str) -> None:
+                if not session_id:
+                    return
+                try:
+                    async with SessionLocal() as db:
+                        result = await interview_intelligence.analyze_question(db, session_id, transcript)
+                    await websocket.send_json({"type": "question_analysis", "data": result})
+                except Exception as exc:
+                    await websocket.send_json({"type": "intelligence_error", "message": str(exc)})
 
             await asyncio.gather(receive_client(), send_model())
     except WebSocketDisconnect:
