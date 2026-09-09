@@ -5,7 +5,10 @@ os.environ["AUTH_SECRET"] = "test-secret"
 os.environ["APP_ENV"] = "development"
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
+from app.db import SessionLocal
+from app.db_models import AuthSessionRecord, UserRecord
 from app.main import app
 
 
@@ -42,10 +45,6 @@ def test_password_is_stored_as_argon2_hash() -> None:
         response = client.post("/api/v1/auth/register", json={"email": email, "password": "StrongPass123"})
         assert response.status_code == 201
 
-        from sqlalchemy import select
-        from app.db import SessionLocal
-        from app.db_models import UserRecord
-
         import asyncio
 
         async def read_hash() -> str:
@@ -57,3 +56,43 @@ def test_password_is_stored_as_argon2_hash() -> None:
         password_hash = asyncio.run(read_hash())
         assert password_hash.startswith("$argon2")
         assert "StrongPass123" not in password_hash
+
+
+def test_logout_revokes_server_side_session() -> None:
+    with TestClient(app) as client:
+        email = "revoke-test@example.com"
+        response = client.post("/api/v1/auth/register", json={"email": email, "password": "StrongPass123"})
+        assert response.status_code == 201
+        token = client.cookies.get("genquantaa_session")
+        assert token
+
+        async def read_session() -> AuthSessionRecord | None:
+            async with SessionLocal() as db:
+                return await db.scalar(select(AuthSessionRecord).where(AuthSessionRecord.token_hash == __import__("hashlib").sha256(token.encode()).hexdigest()))
+
+        session = __import__("asyncio").run(read_session())
+        assert session is not None
+        assert session.revoked_at is None
+
+        assert client.post("/api/v1/auth/logout").status_code == 200
+
+        async def read_revoked() -> AuthSessionRecord | None:
+            async with SessionLocal() as db:
+                return await db.get(AuthSessionRecord, session.id)
+
+        revoked = __import__("asyncio").run(read_revoked())
+        assert revoked is not None
+        assert revoked.revoked_at is not None
+
+
+def test_old_cookie_is_rejected_after_logout() -> None:
+    with TestClient(app) as client:
+        email = "cookie-revoke-test@example.com"
+        response = client.post("/api/v1/auth/register", json={"email": email, "password": "StrongPass123"})
+        assert response.status_code == 201
+        token = client.cookies.get("genquantaa_session")
+        assert token
+
+        assert client.post("/api/v1/auth/logout").status_code == 200
+        client.cookies.set("genquantaa_session", token)
+        assert client.get("/api/v1/auth/me").status_code == 401
