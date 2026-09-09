@@ -34,6 +34,8 @@ async def init_db() -> None:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
         if conn.dialect.name == "postgresql":
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role varchar(30) NOT NULL DEFAULT 'team_member'"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_role ON users(role)"))
             await conn.execute(text("ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS embedding_vector vector(768)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_document_chunks_embedding_vector_hnsw ON document_chunks USING hnsw (embedding_vector vector_cosine_ops)"))
             await conn.execute(text("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES users(id) ON DELETE CASCADE"))
