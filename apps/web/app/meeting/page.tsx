@@ -18,16 +18,14 @@ export default function MeetingPage() {
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
     window.genquantaa?.getMeetingProviders?.().then((items) => { if (items?.length) setProviders(items); });
-    window.genquantaa?.getMeetingState?.().then((result) => { if (result) setState(result); });
-    unsubscribe = window.genquantaa?.onMeetingState?.((nextState) => setState(nextState));
-    void refreshSources();
+    window.genquantaa?.getMeetingState?.().then((result) => { if (result) setState(result as MeetingState); });
+    unsubscribe = window.genquantaa?.onMeetingState?.((nextState) => setState(nextState as MeetingState));
     return () => unsubscribe?.();
   }, []);
 
-  async function refreshSources() { /* Keep mount side effects limited to provider/state hydration. */ }
   async function detect() { setError(""); if (!url.trim()) { setProvider(null); return; } const result = await window.genquantaa?.detectMeetingProvider?.(url.trim()); setProvider(result || null); if (!result) setError("Enter a supported meeting or coding interview URL."); }
-  async function start() { setError(""); const detected = await window.genquantaa?.detectMeetingProvider?.(url.trim()); if (!detected) { setProvider(null); setError("Enter a supported meeting or coding interview URL."); return; } setProvider(detected); const result = await window.genquantaa?.startMeetingMonitor?.({ meetingUrl: url.trim(), title: title.trim(), autoAnswer, answerMode, openMeeting: true }); if (result) { setState(result); if (result.status === "error") setError(result.error || "Could not start meeting session."); } }
-  async function stop() { const result = await window.genquantaa?.stopMeetingMonitor?.(); if (result) setState(result); }
+  async function start() { setError(""); const detected = await window.genquantaa?.detectMeetingProvider?.(url.trim()); if (!detected) { setProvider(null); setError("Enter a supported meeting or coding interview URL."); return; } setProvider(detected); const result = await window.genquantaa?.startMeetingMonitor?.({ meetingUrl: url.trim(), title: title.trim(), autoAnswer, answerMode, openMeeting: true }); if (result) { const meetingResult = result as MeetingState; setState(meetingResult); if (meetingResult.status === "error") setError(meetingResult.error || "Could not start meeting session."); } }
+  async function stop() { const result = await window.genquantaa?.stopMeetingMonitor?.(); if (result) setState(result as MeetingState); }
 
   return <main className="main">
     <div className="top"><div><div className="eyebrow">Session orchestration</div><h1 className="title">Meeting Auto-Session</h1><div className="subtitle">Recognize a supported interview URL, create a session, open the meeting, and route the copilot to the desktop overlay.</div></div><span className="pill"><Radio size={14} /> {state.active ? "Monitoring" : "Ready"}</span></div>
