@@ -11,7 +11,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from .config import get_settings
 from .db import SessionLocal
 from .db_models import SessionRecord
-from .intelligence import interview_intelligence
+from .intelligence import InterviewIntelligence, interview_intelligence
 from .question_boundary import QuestionBoundaryDetector
 
 router = APIRouter(prefix="/api/v1/realtime")
@@ -25,41 +25,37 @@ async def realtime_socket(websocket: WebSocket) -> None:
         await websocket.send_json({"type": "error", "message": "GEMINI_API_KEY is not configured."})
         await websocket.close(code=1008)
         return
-
     try:
         from google import genai
         from google.genai import types
-
         client = genai.Client(api_key=settings.gemini_api_key)
         config = types.LiveConnectConfig(
             response_modalities=["TEXT"],
             input_audio_transcription=types.AudioTranscriptionConfig(mode="SMART"),
             output_audio_transcription=types.AudioTranscriptionConfig(),
-            system_instruction=(
-                "You are GenQuantaa AI, a concise real-time interview copilot. "
-                "Listen for interview questions and provide direct, structured answers. "
-                "Do not invent resume facts. The server separately runs interview intelligence."
-            ),
+            system_instruction="You are GenQuantaa AI, a concise real-time interview copilot. Listen for interview questions and provide direct answers. Do not invent resume facts. The server separately runs grounded interview intelligence.",
         )
-
         session_id: UUID | None = None
+        auto_answer = True
+        answer_mode = "concise"
         detector = QuestionBoundaryDetector()
         async with client.aio.live.connect(model=settings.gemini_model, config=config) as session:
             async def receive_client() -> None:
-                nonlocal session_id
+                nonlocal session_id, auto_answer, answer_mode
                 while True:
                     message: dict[str, Any] = json.loads(await websocket.receive_text())
                     kind = message.get("type")
                     if kind == "start":
                         raw_id = message.get("session_id")
+                        auto_answer = bool(message.get("auto_answer", True))
+                        requested_mode = str(message.get("answer_mode", "concise"))
+                        answer_mode = requested_mode if requested_mode in InterviewIntelligence.ANSWER_MODES else "concise"
                         async with SessionLocal() as db:
                             if raw_id:
                                 try:
                                     candidate = UUID(str(raw_id))
-                                    if await db.get(SessionRecord, candidate):
-                                        session_id = candidate
-                                except ValueError:
-                                    pass
+                                    if await db.get(SessionRecord, candidate): session_id = candidate
+                                except ValueError: pass
                             if session_id is None:
                                 record = SessionRecord(title="Live interview", mode="live")
                                 db.add(record)
@@ -67,47 +63,31 @@ async def realtime_socket(websocket: WebSocket) -> None:
                                 await db.refresh(record)
                                 session_id = record.id
                         detector.reset()
-                        await websocket.send_json({"type": "session", "session_id": str(session_id)})
+                        await websocket.send_json({"type": "session", "session_id": str(session_id), "auto_answer": auto_answer, "answer_mode": answer_mode})
+                    elif kind == "settings":
+                        auto_answer = bool(message.get("auto_answer", auto_answer))
+                        requested_mode = str(message.get("answer_mode", answer_mode))
+                        answer_mode = requested_mode if requested_mode in InterviewIntelligence.ANSWER_MODES else answer_mode
+                        await websocket.send_json({"type": "settings", "auto_answer": auto_answer, "answer_mode": answer_mode})
                     elif kind == "text":
                         text = str(message.get("text", "")).strip()
-                        if text:
-                            await session.send_realtime_input(text=text)
+                        if text: await session.send_realtime_input(text=text)
                     elif kind == "context":
                         text = str(message.get("text", "")).strip()
-                        if text:
-                            await session.send_realtime_input(text=f"Context update:\n{text}")
+                        if text: await session.send_realtime_input(text=f"Context update:\n{text}")
                     elif kind == "audio":
                         data = base64.b64decode(message.get("data", ""))
                         if data:
-                            await session.send_realtime_input(
-                                audio=types.Blob(
-                                    data=data,
-                                    mime_type=message.get("mime_type", "audio/pcm;rate=16000"),
-                                )
-                            )
+                            await session.send_realtime_input(audio=types.Blob(data=data, mime_type=message.get("mime_type", "audio/pcm;rate=16000")))
                     elif kind == "audio_end":
                         await session.send_realtime_input(audio_stream_end=True)
 
             async def analyze_and_send(boundary: Any) -> None:
-                if not session_id:
-                    return
+                if not session_id or not auto_answer: return
                 try:
-                    await websocket.send_json({
-                        "type": "question_detected",
-                        "data": {
-                            "text": boundary.text,
-                            "confidence": boundary.confidence,
-                            "reason": boundary.reason,
-                        },
-                    })
+                    await websocket.send_json({"type": "question_detected", "data": {"text": boundary.text, "confidence": boundary.confidence, "reason": boundary.reason}})
                     async with SessionLocal() as db:
-                        result = await interview_intelligence.analyze_question(
-                            db,
-                            session_id,
-                            boundary.text,
-                            detection_confidence=boundary.confidence,
-                            detection_reason=boundary.reason,
-                        )
+                        result = await interview_intelligence.analyze_question(db, session_id, boundary.text, detection_confidence=boundary.confidence, detection_reason=boundary.reason, answer_mode=answer_mode)
                     await websocket.send_json({"type": "question_analysis", "data": result})
                 except Exception as exc:
                     await websocket.send_json({"type": "intelligence_error", "message": str(exc)})
@@ -117,33 +97,26 @@ async def realtime_socket(websocket: WebSocket) -> None:
                     server = getattr(response, "server_content", None)
                     if server:
                         interim = getattr(server, "interim_input_transcription", None)
-                        if interim and getattr(interim, "text", None):
-                            await websocket.send_json({"type": "transcript_interim", "text": interim.text})
+                        if interim and getattr(interim, "text", None): await websocket.send_json({"type": "transcript_interim", "text": interim.text})
                         final = getattr(server, "input_transcription", None)
                         if final and getattr(final, "text", None):
                             transcript = final.text.strip()
                             if transcript:
                                 detector.add(transcript)
                                 await websocket.send_json({"type": "transcript", "text": transcript})
-                                # Explicit punctuation can close a question before turnComplete.
                                 if "?" in transcript:
                                     boundary = detector.flush()
-                                    if boundary:
-                                        asyncio.create_task(analyze_and_send(boundary))
+                                    if boundary: asyncio.create_task(analyze_and_send(boundary))
                         output = getattr(server, "output_transcription", None)
-                        if output and getattr(output, "text", None):
-                            await websocket.send_json({"type": "text", "text": output.text})
+                        if output and getattr(output, "text", None): await websocket.send_json({"type": "text", "text": output.text})
                         if getattr(server, "interrupted", False):
                             detector.reset()
                             await websocket.send_json({"type": "interrupted"})
                         if getattr(server, "turn_complete", False):
                             boundary = detector.flush()
-                            if boundary:
-                                asyncio.create_task(analyze_and_send(boundary))
+                            if boundary: asyncio.create_task(analyze_and_send(boundary))
                             await websocket.send_json({"type": "turn_complete"})
-                    if response.text:
-                        await websocket.send_json({"type": "text", "text": response.text})
-
+                    if response.text: await websocket.send_json({"type": "text", "text": response.text})
             await asyncio.gather(receive_client(), send_model())
     except WebSocketDisconnect:
         return
@@ -151,5 +124,4 @@ async def realtime_socket(websocket: WebSocket) -> None:
         try:
             await websocket.send_json({"type": "error", "message": str(exc)})
             await websocket.close(code=1011)
-        except Exception:
-            pass
+        except Exception: pass
