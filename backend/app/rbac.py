@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .audit import record_audit
 from .auth import current_user
 from .config import get_settings
 from .db import get_db
@@ -78,7 +79,7 @@ async def list_users(user: UserRecord = Depends(require_roles("admin", "cto")), 
 
 
 @router.patch("/users/{user_id}/role", response_model=AdminUserOut)
-async def update_role(user_id: UUID, payload: RoleUpdate, actor: UserRecord = Depends(require_roles("admin", "cto")), db: AsyncSession = Depends(get_db)) -> AdminUserOut:
+async def update_role(user_id: UUID, payload: RoleUpdate, request: Request, actor: UserRecord = Depends(require_roles("admin", "cto")), db: AsyncSession = Depends(get_db)) -> AdminUserOut:
     target = await db.get(UserRecord, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -88,7 +89,9 @@ async def update_role(user_id: UUID, payload: RoleUpdate, actor: UserRecord = De
         raise HTTPException(status_code=403, detail="CTO can manage manager and team-member roles only")
     if actor.role == "cto" and ROLE_RANK.get(target.role, 0) > ROLE_RANK["manager"]:
         raise HTTPException(status_code=403, detail="CTO cannot change an admin or CTO")
+    previous_role = target.role
     target.role = payload.role
+    await record_audit(db, request, "role_changed", actor.id, "user", str(target.id), {"from_role": previous_role, "to_role": target.role})
     await db.commit()
     await db.refresh(target)
     return AdminUserOut(id=target.id, email=target.email, name=target.name, role=target.role, is_active=target.is_active)
