@@ -6,9 +6,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from .auth import current_user
 from .db import get_db
@@ -80,13 +79,23 @@ async def upload_document(file: UploadFile = File(...), db: AsyncSession = Depen
 @router.get("", response_model=list[DocumentOut])
 async def list_documents(db: AsyncSession = Depends(get_db), user: UserRecord = Depends(current_user)) -> list[DocumentOut]:
     statement = (
-        select(Document)
-        .options(selectinload(Document.chunks))
+        select(Document, func.count(DocumentChunk.id).label("chunk_count"))
+        .outerjoin(DocumentChunk, DocumentChunk.document_id == Document.id)
         .where(Document.user_id == user.id)
+        .group_by(Document.id)
         .order_by(Document.created_at.desc())
     )
     result = await db.execute(statement)
-    return [DocumentOut(id=d.id, filename=d.filename, content_type=d.content_type, characters=len(d.content), chunks=len(d.chunks)) for d in result.scalars().all()]
+    return [
+        DocumentOut(
+            id=document.id,
+            filename=document.filename,
+            content_type=document.content_type,
+            characters=len(document.content),
+            chunks=chunk_count,
+        )
+        for document, chunk_count in result.all()
+    ]
 
 
 @router.post("/search")
