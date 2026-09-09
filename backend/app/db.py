@@ -38,6 +38,7 @@ async def init_db() -> None:
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_document_chunks_embedding_vector_hnsw ON document_chunks USING hnsw (embedding_vector vector_cosine_ops)"))
             await conn.execute(text("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES users(id) ON DELETE CASCADE"))
             await conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES users(id) ON DELETE CASCADE"))
+            await conn.execute(text("ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS user_agent varchar(1000) NOT NULL DEFAULT ''"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_sessions_user_id ON sessions(user_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_documents_user_id ON documents(user_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_auth_sessions_user_id ON auth_sessions(user_id)"))
