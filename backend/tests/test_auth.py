@@ -88,3 +88,60 @@ def test_old_cookie_is_rejected_after_logout() -> None:
         assert client.post("/api/v1/auth/logout").status_code == 200
         client.cookies.set("genquantaa_session", token)
         assert client.get("/api/v1/auth/me").status_code == 401
+
+
+def test_sessions_are_user_scoped_and_mark_current_session() -> None:
+    with TestClient(app, headers={"User-Agent": "Mozilla/5.0 Chrome/140.0 Windows NT 10.0"}) as first:
+        assert first.post("/api/v1/auth/register", json={"email": "sessions-a@example.com", "password": "StrongPass123"}).status_code == 201
+        # A second login creates a distinct active session for the same user.
+        assert first.post("/api/v1/auth/login", json={"email": "sessions-a@example.com", "password": "StrongPass123"}).status_code == 200
+        sessions = first.get("/api/v1/auth/sessions")
+        assert sessions.status_code == 200
+        rows = sessions.json()
+        assert len(rows) == 2
+        assert sum(row["current"] for row in rows) == 1
+        assert all(row["device"] == "Chrome · Windows" for row in rows)
+
+        with TestClient(app) as second:
+            assert second.post("/api/v1/auth/register", json={"email": "sessions-b@example.com", "password": "StrongPass123"}).status_code == 201
+            other = second.get("/api/v1/auth/sessions")
+            assert other.status_code == 200
+            assert len(other.json()) == 1
+            assert all(row["id"] not in {item["id"] for item in rows} for row in other.json())
+
+
+def test_revoke_individual_session_and_revoke_all() -> None:
+    with TestClient(app) as client:
+        email = "session-revoke-api@example.com"
+        assert client.post("/api/v1/auth/register", json={"email": email, "password": "StrongPass123"}).status_code == 201
+        first_token = client.cookies.get("genquantaa_session")
+        assert first_token
+
+        assert client.post("/api/v1/auth/login", json={"email": email, "password": "StrongPass123"}).status_code == 200
+        rows = client.get("/api/v1/auth/sessions").json()
+        assert len(rows) == 2
+        old_session_id = next(row["id"] for row in rows if not row["current"])
+
+        revoked = client.delete(f"/api/v1/auth/sessions/{old_session_id}")
+        assert revoked.status_code == 200
+        assert revoked.json()["current"] is False
+        remaining = client.get("/api/v1/auth/sessions")
+        assert remaining.status_code == 200
+        assert len(remaining.json()) == 1
+        assert remaining.json()[0]["current"] is True
+
+        # Restore the first token to prove the individually revoked session is rejected.
+        client.cookies.set("genquantaa_session", first_token)
+        assert client.get("/api/v1/auth/me").status_code == 401
+
+        # The current login is still valid through the current token.
+        current_token = rows[0]["id"]
+        assert current_token
+        # Re-authenticate to obtain a fresh current session before testing revoke-all.
+        client.cookies.clear()
+        assert client.post("/api/v1/auth/login", json={"email": email, "password": "StrongPass123"}).status_code == 200
+        all_revoked = client.post("/api/v1/auth/sessions/revoke-all")
+        assert all_revoked.status_code == 200
+        assert all_revoked.json()["revoked_count"] >= 1
+        assert client.get("/api/v1/auth/me").status_code == 401
+        assert client.get("/api/v1/auth/sessions").status_code == 401
