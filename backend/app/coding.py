@@ -8,16 +8,33 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .ai import GeminiService
+from .auth import current_user
 from .db import get_db
-from .db_models import InterviewQuestion, SessionRecord
+from .db_models import InterviewQuestion, SessionRecord, UserRecord
 from .rag import retriever
 
 router = APIRouter(prefix="/api/v1/coding", tags=["coding"])
 ai = GeminiService()
 
 
+async def owned_session(db: AsyncSession, session_id: UUID, user: UserRecord) -> SessionRecord:
+    session = await db.scalar(
+        select(SessionRecord).where(
+            SessionRecord.id == session_id,
+            SessionRecord.user_id == user.id,
+        )
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
 @router.post("/analyze")
-async def analyze_code(payload: dict, db: AsyncSession = Depends(get_db)) -> dict:
+async def analyze_code(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    user: UserRecord = Depends(current_user),
+) -> dict:
     session_id = payload.get("session_id")
     code = str(payload.get("code", "")).strip()
     question = str(payload.get("question", "")).strip()
@@ -32,17 +49,22 @@ async def analyze_code(payload: dict, db: AsyncSession = Depends(get_db)) -> dic
             sid = UUID(str(session_id))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="invalid session_id") from exc
-        if not await db.get(SessionRecord, sid):
-            raise HTTPException(status_code=404, detail="Session not found")
+        await owned_session(db, sid, user)
     else:
-        session = SessionRecord(title="Coding interview", mode="coding")
+        session = SessionRecord(
+            user_id=user.id,
+            title="Coding interview",
+            mode="coding",
+        )
         db.add(session)
         await db.flush()
         sid = session.id
 
     query = question or code[:2000]
-    retrieved = await retriever.retrieve(db, query, limit=4)
-    context = "\n\n".join(f"Source: {item['filename']}\n{item['content']}" for item in retrieved)
+    retrieved = await retriever.retrieve(db, query, limit=4, user_id=user.id)
+    context = "\n\n".join(
+        f"Source: {item['filename']}\n{item['content']}" for item in retrieved
+    )
     prompt = f"""Analyze this coding interview problem and code as a senior software engineer.
 Return ONLY valid JSON with keys: language, problem, approach, solution, optimized_solution, complexity, edge_cases, explanation, interview_tips.
 Use concise but complete content. Preserve the candidate's language when possible. Do not invent requirements.
@@ -95,16 +117,27 @@ Relevant candidate/knowledge context:
     )
     db.add(record)
     await db.commit()
-    return {"session_id": str(sid), "question_id": str(record.id), **parsed, "sources": retrieved}
+    return {
+        "session_id": str(sid),
+        "question_id": str(record.id),
+        **parsed,
+        "sources": retrieved,
+    }
 
 
 @router.get("/sessions/{session_id}")
-async def coding_history(session_id: UUID, db: AsyncSession = Depends(get_db)) -> list[dict]:
-    if not await db.get(SessionRecord, session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
+async def coding_history(
+    session_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: UserRecord = Depends(current_user),
+) -> list[dict]:
+    await owned_session(db, session_id, user)
     result = await db.execute(
         select(InterviewQuestion)
-        .where(InterviewQuestion.session_id == session_id, InterviewQuestion.question_type == "coding")
+        .where(
+            InterviewQuestion.session_id == session_id,
+            InterviewQuestion.question_type == "coding",
+        )
         .order_by(InterviewQuestion.created_at.desc())
     )
     return [
