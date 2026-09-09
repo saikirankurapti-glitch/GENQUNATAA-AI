@@ -25,10 +25,11 @@ function sanitizeTitle(value) {
 }
 
 class MeetingOrchestrator {
-  constructor({ mainWindow, webUrl, apiUrl, onState }) {
+  constructor({ mainWindow, webUrl, apiUrl, authCookieProvider, onState }) {
     this.mainWindow = mainWindow;
     this.webUrl = webUrl;
     this.apiUrl = apiUrl;
+    this.authCookieProvider = authCookieProvider;
     this.onState = onState;
     this.timer = null;
     this.state = { active: false, provider: null, provider_name: null, meeting_url: null, session_id: null, title: null };
@@ -37,6 +38,13 @@ class MeetingOrchestrator {
   emit(extra = {}) {
     this.state = { ...this.state, ...extra };
     this.onState?.(this.state);
+  }
+
+  async authenticatedFetch(url, options = {}) {
+    const cookie = await this.authCookieProvider?.();
+    if (!cookie) throw new Error('Please sign in to GenQuantaa AI before starting a meeting session.');
+    const headers = { ...(options.headers || {}), Cookie: cookie };
+    return fetch(url, { ...options, headers });
   }
 
   async start({ meetingUrl, title, answerMode = 'concise', autoAnswer = true, openMeeting = true }) {
@@ -48,7 +56,7 @@ class MeetingOrchestrator {
     this.emit({ active: true, provider: provider.id, provider_name: provider.name, meeting_url: meetingUrl, session_id: null, title: sessionTitle, status: 'creating_session' });
 
     try {
-      const response = await fetch(`${this.apiUrl}/api/v1/sessions`, {
+      const response = await this.authenticatedFetch(`${this.apiUrl}/api/v1/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title: sessionTitle, mode: 'copilot' }),
