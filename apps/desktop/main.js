@@ -39,13 +39,14 @@ app.whenReady().then(() => {
 
   ipcMain.handle('screen-context-sources', () => screenContext.listSources());
   ipcMain.handle('screen-context-start', async (_event, sourceId) => { try { return await screenContext.start(sourceId); } catch (error) { return { active: false, status: 'error', error: error instanceof Error ? error.message : 'Could not start screen context' }; } });
+  ipcMain.handle('screen-context-analyze', async () => { try { return await screenContext.analyze(); } catch (error) { return { active: screenContext.active, status: 'error', error: error instanceof Error ? error.message : 'Visual analysis failed' }; } });
   ipcMain.handle('screen-context-stop', () => screenContext.stop());
   ipcMain.handle('screen-context-state', () => screenContext.getState());
 
   createMainWindow();
   createOverlay();
   meetingOrchestrator = new MeetingOrchestrator({ mainWindow, webUrl: WEB_URL, apiUrl: API_URL, onState: broadcastMeetingState });
-  screenContext = new ScreenContextService({ onState: broadcastScreenState });
+  screenContext = new ScreenContextService({ onState: broadcastScreenState, apiUrl: API_URL });
   app.on('before-quit', () => { meetingOrchestrator?.stop(false); screenContext?.stop(); });
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); });
 });
