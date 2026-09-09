@@ -1,12 +1,86 @@
-from fastapi import APIRouter, File, UploadFile
+from __future__ import annotations
+
+import io
+import re
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from .db import get_db
+from .db_models import Document, DocumentChunk
 
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
-
 _ALLOWED = {"application/pdf", "text/plain", "text/markdown"}
+_MAX_BYTES = 10 * 1024 * 1024
+_CHUNK_SIZE = 1200
 
-@router.post("/upload")
-async def upload_document(file: UploadFile = File(...)) -> dict[str, str | int]:
+
+class DocumentOut(BaseModel):
+    id: UUID
+    filename: str
+    content_type: str
+    characters: int
+
+
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 5
+
+
+def extract_text(data: bytes, content_type: str) -> str:
+    if content_type == "application/pdf":
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(data))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+    return data.decode("utf-8", errors="replace")
+
+
+def chunk_text(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    return [normalized[i : i + _CHUNK_SIZE] for i in range(0, len(normalized), _CHUNK_SIZE) if normalized[i : i + _CHUNK_SIZE]]
+
+
+@router.post("/upload", response_model=DocumentOut)
+async def upload_document(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)) -> DocumentOut:
     if file.content_type not in _ALLOWED:
-        return {"status":"rejected", "reason":"Supported types: PDF, TXT, Markdown"}
+        raise HTTPException(status_code=415, detail="Supported types: PDF, TXT, Markdown")
     data = await file.read()
-    return {"status":"accepted", "filename":file.filename or "document", "bytes":len(data)}
+    if len(data) > _MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Document exceeds the 10 MB limit")
+
+    text = extract_text(data, file.content_type or "text/plain")
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="No readable text found in document")
+
+    document = Document(filename=file.filename or "document", content_type=file.content_type, content=text)
+    db.add(document)
+    await db.flush()
+    for index, chunk in enumerate(chunk_text(text)):
+        db.add(DocumentChunk(document_id=document.id, chunk_index=index, content=chunk))
+    await db.commit()
+    await db.refresh(document)
+    return DocumentOut(id=document.id, filename=document.filename, content_type=document.content_type, characters=len(text))
+
+
+@router.get("", response_model=list[DocumentOut])
+async def list_documents(db: AsyncSession = Depends(get_db)) -> list[DocumentOut]:
+    result = await db.execute(select(Document).order_by(Document.created_at.desc()))
+    return [DocumentOut(id=d.id, filename=d.filename, content_type=d.content_type, characters=len(d.content)) for d in result.scalars().all()]
+
+
+@router.post("/search")
+async def search_documents(payload: SearchRequest, db: AsyncSession = Depends(get_db)) -> dict:
+    terms = [term.lower() for term in re.findall(r"[a-zA-Z0-9_]+", payload.query) if len(term) > 2]
+    result = await db.execute(select(DocumentChunk))
+    scored: list[tuple[int, DocumentChunk]] = []
+    for chunk in result.scalars().all():
+        haystack = chunk.content.lower()
+        score = sum(haystack.count(term) for term in terms)
+        if score:
+            scored.append((score, chunk))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return {"query": payload.query, "results": [{"document_id": str(c.document_id), "chunk_index": c.chunk_index, "score": score, "content": c.content} for score, c in scored[: max(1, min(payload.limit, 20))]]}
