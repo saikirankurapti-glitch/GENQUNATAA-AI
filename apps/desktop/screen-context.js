@@ -6,25 +6,17 @@ const MIN_INTERVAL_MS = 5000;
 const MAX_INTERVAL_MS = 60000;
 
 function normalizeSource(source) {
-  return {
-    id: source.id,
-    name: String(source.name || 'Untitled').slice(0, 200),
-    display_id: source.display_id || null,
-    thumbnail: source.thumbnail ? source.thumbnail.toDataURL() : null
-  };
+  return { id: source.id, name: String(source.name || 'Untitled').slice(0, 200), display_id: source.display_id || null, thumbnail: source.thumbnail ? source.thumbnail.toDataURL() : null };
 }
 
 class ScreenContextService {
-  constructor({ onState, apiUrl, authCookieProvider }) {
-    this.onState = onState; this.apiUrl = apiUrl; this.authCookieProvider = authCookieProvider; this.active = false; this.selectedSource = null; this.sources = [];
+  constructor({ onState, apiUrl, authCookieProvider, onAuthRequired }) {
+    this.onState = onState; this.apiUrl = apiUrl; this.authCookieProvider = authCookieProvider; this.onAuthRequired = onAuthRequired; this.active = false; this.selectedSource = null; this.sources = [];
     this.lastCapture = null; this.lastAnalysis = null; this.continuous = false; this.intervalMs = DEFAULT_INTERVAL_MS; this.timer = null; this.analyzing = false;
     this.adaptive = true; this.diffThreshold = DEFAULT_DIFF_THRESHOLD; this.previousFrame = null; this.lastChangeAt = null; this.changeScore = null; this.skippedUnchangedFrames = 0;
   }
   emit(extra = {}) {
-    const state = { active: this.active, selected_source: this.selectedSource, sources: this.sources, last_capture_at: this.lastCapture,
-      last_analysis_at: this.lastAnalysis?.analyzed_at || null, analysis: this.lastAnalysis?.analysis || null, continuous: this.continuous,
-      interval_ms: this.intervalMs, analyzing: this.analyzing, adaptive: this.adaptive, diff_threshold: this.diffThreshold,
-      change_score: this.changeScore, last_change_at: this.lastChangeAt, skipped_unchanged_frames: this.skippedUnchangedFrames, ...extra };
+    const state = { active: this.active, selected_source: this.selectedSource, sources: this.sources, last_capture_at: this.lastCapture, last_analysis_at: this.lastAnalysis?.analyzed_at || null, analysis: this.lastAnalysis?.analysis || null, continuous: this.continuous, interval_ms: this.intervalMs, analyzing: this.analyzing, adaptive: this.adaptive, diff_threshold: this.diffThreshold, change_score: this.changeScore, last_change_at: this.lastChangeAt, skipped_unchanged_frames: this.skippedUnchangedFrames, ...extra };
     this.onState?.(state); return state;
   }
   async listSources() {
@@ -51,7 +43,7 @@ class ScreenContextService {
   }
   async authenticatedFetch(url, options = {}) {
     const cookie = await this.authCookieProvider?.();
-    if (!cookie) throw new Error('Please sign in to GenQuantaa AI before analyzing visual context.');
+    if (!cookie) { await this.onAuthRequired?.(); throw new Error('Authentication required'); }
     const headers = { ...(options.headers || {}), Cookie: cookie };
     return fetch(url, { ...options, headers });
   }
@@ -62,7 +54,9 @@ class ScreenContextService {
     try {
       const form = new FormData(); form.append('file', new Blob([capture.png], { type: 'image/png' }), 'screen-context.png');
       const response = await this.authenticatedFetch(`${this.apiUrl}/api/v1/visual/analyze`, { method: 'POST', body: form });
-      const payload = await response.json().catch(() => ({})); if (!response.ok) throw new Error(payload.detail || `Visual analysis failed (${response.status})`);
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 401) { this.stop(); this.emit({ active: false, status: 'auth_required', error: 'Your GenQuantaa session has expired. Please sign in again.' }); await this.onAuthRequired?.(); return this.getState(); }
+      if (!response.ok) throw new Error(payload.detail || `Visual analysis failed (${response.status})`);
       this.lastCapture = new Date().toISOString(); this.lastAnalysis = { analyzed_at: this.lastCapture, analysis: payload.analysis }; return this.emit({ status: 'analyzed' });
     } finally { this.analyzing = false; this.emit(); }
   }
