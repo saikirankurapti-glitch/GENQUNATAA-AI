@@ -6,19 +6,6 @@ import { ArrowLeft, ExternalLink, Link2, Play, Radio, Square } from "lucide-reac
 type Provider = { id: string; name: string };
 type MeetingState = { active?: boolean; provider?: string | null; provider_name?: string | null; meeting_url?: string | null; session_id?: string | null; title?: string | null; status?: string; error?: string };
 
-declare global {
-  interface Window {
-    genquantaa?: {
-      detectMeetingProvider?: (url: string) => Promise<Provider | null>;
-      getMeetingProviders?: () => Promise<Provider[]>;
-      startMeetingMonitor?: (payload: { meetingUrl: string; title?: string; autoAnswer?: boolean; answerMode?: string; openMeeting?: boolean }) => Promise<MeetingState>;
-      stopMeetingMonitor?: () => Promise<MeetingState>;
-      getMeetingState?: () => Promise<MeetingState>;
-      onMeetingState?: (callback: (state: MeetingState) => void) => () => void;
-    };
-  }
-}
-
 const fallbackProviders: Provider[] = [
   { id: "google-meet", name: "Google Meet" },
   { id: "microsoft-teams", name: "Microsoft Teams" },
