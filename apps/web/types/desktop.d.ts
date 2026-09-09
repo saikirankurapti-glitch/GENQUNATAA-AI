@@ -7,6 +7,7 @@ declare global {
     startMeetingMonitor?: (payload: { meetingUrl: string; title?: string; autoAnswer?: boolean; answerMode?: string; openMeeting?: boolean }) => Promise<unknown>;
     stopMeetingMonitor?: () => Promise<unknown>; getMeetingState?: () => Promise<unknown>; onMeetingState?: (callback: (state: unknown) => void) => () => void;
     getScreenContextSources?: () => Promise<unknown>; startScreenContext?: (sourceId: string) => Promise<unknown>; analyzeScreenContext?: () => Promise<unknown>;
+    setScreenContextAdaptive?: (enabled: boolean) => Promise<unknown>; setScreenContextSensitivity?: (threshold: number) => Promise<unknown>;
     startContinuousScreenContext?: (intervalMs?: number) => Promise<unknown>; stopContinuousScreenContext?: () => Promise<unknown>;
     stopScreenContext?: () => Promise<unknown>; getScreenContextState?: () => Promise<unknown>; onScreenContextState?: (callback: (state: unknown) => void) => () => void;
     onCopilotUpdate?: (callback: (payload: unknown) => void) => () => void;
