@@ -25,13 +25,8 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db() -> None:
     from .db_models import (
-        Document,
-        DocumentChunk,
-        InterviewQuestion,
-        MessageRecord,
-        ResumeProfile,
-        SessionNote,
-        SessionRecord,
+        Document, DocumentChunk, InterviewQuestion, MessageRecord,
+        ResumeProfile, SessionNote, SessionRecord, UserRecord,
     )  # noqa: F401
 
     async with engine.begin() as conn:
@@ -39,6 +34,9 @@ async def init_db() -> None:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
         if conn.dialect.name == "postgresql":
-            # Safe for existing deployments created before native pgvector support.
             await conn.execute(text("ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS embedding_vector vector(768)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_document_chunks_embedding_vector_hnsw ON document_chunks USING hnsw (embedding_vector vector_cosine_ops)"))
+            await conn.execute(text("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES users(id) ON DELETE CASCADE"))
+            await conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES users(id) ON DELETE CASCADE"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_sessions_user_id ON sessions(user_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_documents_user_id ON documents(user_id)"))
