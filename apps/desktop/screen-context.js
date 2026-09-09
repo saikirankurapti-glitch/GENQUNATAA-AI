@@ -40,28 +40,21 @@ class ScreenContextService {
     this.lastCapture = new Date().toISOString(); this.lastAnalysis = null; this.previousFrame = null; this.lastChangeAt = null; this.changeScore = null; this.skippedUnchangedFrames = 0;
     return this.emit({ status: 'ready' });
   }
-  setAdaptive(enabled) {
-    this.adaptive = Boolean(enabled);
-    if (!this.adaptive) this.previousFrame = null;
-    return this.emit({ status: 'adaptive_updated' });
-  }
-  setDiffThreshold(value) {
-    this.diffThreshold = clampThreshold(value);
-    return this.emit({ status: 'sensitivity_updated' });
-  }
+  setAdaptive(enabled) { this.adaptive = Boolean(enabled); if (!this.adaptive) this.previousFrame = null; return this.emit({ status: 'adaptive_updated' }); }
+  setDiffThreshold(value) { this.diffThreshold = clampThreshold(value); return this.emit({ status: 'sensitivity_updated' }); }
   async captureSelected() {
     const sources = await desktopCapturer.getSources({ types: ['window', 'screen'], thumbnailSize: { width: 1280, height: 720 }, fetchWindowIcons: false });
     const selected = sources.find((source) => source.id === this.selectedSource?.id);
     if (!selected) throw new Error('The selected source is no longer available. Refresh and select it again.');
-    const image = selected.thumbnail?.toPNG(); if (!image || image.length === 0) throw new Error('Could not capture the selected source.');
-    return image;
+    const image = selected.thumbnail; if (!image || image.isEmpty()) throw new Error('Could not capture the selected source.');
+    return { png: image.toPNG(), bitmap: image.toBitmap() };
   }
-  async analyze(image) {
+  async analyze(capture) {
     if (!this.active || !this.selectedSource) throw new Error('Select a screen or window before analyzing visual context.');
     if (this.analyzing) return this.emit({ status: 'analyzing' });
     this.analyzing = true; this.emit({ status: 'capturing' });
     try {
-      const form = new FormData(); form.append('file', new Blob([image], { type: 'image/png' }), 'screen-context.png');
+      const form = new FormData(); form.append('file', new Blob([capture.png], { type: 'image/png' }), 'screen-context.png');
       const response = await fetch(`${this.apiUrl}/api/v1/visual/analyze`, { method: 'POST', body: form });
       const payload = await response.json().catch(() => ({})); if (!response.ok) throw new Error(payload.detail || `Visual analysis failed (${response.status})`);
       this.lastCapture = new Date().toISOString(); this.lastAnalysis = { analyzed_at: this.lastCapture, analysis: payload.analysis }; return this.emit({ status: 'analyzed' });
@@ -71,20 +64,15 @@ class ScreenContextService {
   async inspectFrame() {
     if (!this.active || !this.selectedSource) throw new Error('Select a screen or window before enabling continuous context.');
     if (this.analyzing) return this.emit({ status: 'analyzing' });
-    const image = await this.captureSelected();
-    const current = Buffer.from(image);
+    const capture = await this.captureSelected();
+    const current = Buffer.from(capture.bitmap);
     const score = this.previousFrame ? pixelDifference(this.previousFrame, current) : 1;
-    this.changeScore = Number(score.toFixed(4));
-    this.previousFrame = current;
+    this.changeScore = Number(score.toFixed(4)); this.previousFrame = current;
     this.lastCapture = new Date().toISOString();
     const changed = !this.adaptive || score >= this.diffThreshold;
-    if (!changed) {
-      this.skippedUnchangedFrames += 1;
-      return this.emit({ status: 'unchanged', scene_changed: false });
-    }
-    this.lastChangeAt = this.lastCapture;
-    this.skippedUnchangedFrames = 0;
-    return this.analyze(image);
+    if (!changed) { this.skippedUnchangedFrames += 1; return this.emit({ status: 'unchanged', scene_changed: false }); }
+    this.lastChangeAt = this.lastCapture; this.skippedUnchangedFrames = 0;
+    return this.analyze(capture);
   }
   startContinuous(intervalMs = DEFAULT_INTERVAL_MS) {
     if (!this.active || !this.selectedSource) throw new Error('Select a screen or window before enabling continuous context.');
