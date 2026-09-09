@@ -25,7 +25,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db() -> None:
     from .db_models import (
-        Document, DocumentChunk, InterviewQuestion, MessageRecord,
+        AuthSessionRecord, Document, DocumentChunk, InterviewQuestion, MessageRecord,
         ResumeProfile, SessionNote, SessionRecord, UserRecord,
     )  # noqa: F401
 
@@ -40,3 +40,6 @@ async def init_db() -> None:
             await conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES users(id) ON DELETE CASCADE"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_sessions_user_id ON sessions(user_id)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_documents_user_id ON documents(user_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_auth_sessions_user_id ON auth_sessions(user_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_auth_sessions_expires_at ON auth_sessions(expires_at)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_auth_sessions_revoked_at ON auth_sessions(revoked_at)"))
