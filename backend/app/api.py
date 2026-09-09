@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .ai import GeminiService
@@ -34,12 +34,62 @@ async def list_sessions(db: AsyncSession = Depends(get_db)) -> list[Session]:
     return [to_session(item) for item in result.scalars().all()]
 
 
+@router.get("/sessions/analytics")
+async def session_analytics(db: AsyncSession = Depends(get_db)) -> dict:
+    sessions = (await db.execute(select(SessionRecord).order_by(SessionRecord.created_at.desc()).limit(100))).scalars().all()
+    rows = []
+    for session in sessions:
+        questions = await db.scalar(select(func.count(InterviewQuestion.id)).where(InterviewQuestion.session_id == session.id))
+        notes = await db.scalar(select(func.count(SessionNote.id)).where(SessionNote.session_id == session.id))
+        confidence = await db.scalar(select(func.avg(InterviewQuestion.confidence)).where(InterviewQuestion.session_id == session.id))
+        rows.append({
+            "id": str(session.id),
+            "title": session.title,
+            "mode": session.mode,
+            "created_at": session.created_at.isoformat() if session.created_at else None,
+            "question_count": int(questions or 0),
+            "note_count": int(notes or 0),
+            "average_confidence": round(float(confidence or 0), 3),
+        })
+    active = [r["average_confidence"] for r in rows if r["question_count"]]
+    modes: dict[str, int] = {}
+    for row in rows:
+        modes[row["mode"]] = modes.get(row["mode"], 0) + 1
+    return {
+        "total_sessions": len(rows),
+        "total_questions": sum(r["question_count"] for r in rows),
+        "total_notes": sum(r["note_count"] for r in rows),
+        "average_confidence": round(sum(active) / len(active), 3) if active else 0,
+        "mode_counts": modes,
+        "sessions": rows,
+    }
+
+
 @router.get("/sessions/{session_id}", response_model=Session)
 async def get_session(session_id: UUID, db: AsyncSession = Depends(get_db)) -> Session:
     record = await db.get(SessionRecord, session_id)
     if not record:
         raise HTTPException(status_code=404, detail="Session not found")
     return to_session(record)
+
+
+@router.get("/sessions/{session_id}/analytics")
+async def session_detail_analytics(session_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    record = await db.get(SessionRecord, session_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Session not found")
+    questions = (await db.execute(select(InterviewQuestion).where(InterviewQuestion.session_id == session_id).order_by(InterviewQuestion.created_at.desc()))).scalars().all()
+    notes = (await db.execute(select(SessionNote).where(SessionNote.session_id == session_id).order_by(SessionNote.created_at.desc()))).scalars().all()
+    values = [float(q.confidence or 0) for q in questions]
+    return {
+        "session": to_session(record).model_dump(mode="json"),
+        "question_count": len(questions),
+        "note_count": len(notes),
+        "average_confidence": round(sum(values) / len(values), 3) if values else 0,
+        "high_confidence_questions": sum(1 for value in values if value >= 0.7),
+        "questions": [interview_intelligence.serialize_question(q) for q in questions],
+        "notes": [{"id": str(n.id), "type": n.note_type, "content": n.content, "created_at": n.created_at.isoformat() if n.created_at else None} for n in notes],
+    }
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -52,13 +102,11 @@ async def chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)) -> Chat
         session_id = session.id
     elif not await db.get(SessionRecord, session_id):
         raise HTTPException(status_code=404, detail="Session not found")
-
     retrieved = await retriever.retrieve(db, payload.message, limit=5)
     retrieved_context = "\n\n".join(f"Source: {item['filename']}\n{item['content']}" for item in retrieved)
     context_parts = [part for part in [payload.context, retrieved_context] if part]
-    context = "\n\n".join(context_parts) or None
     try:
-        answer = await ai.generate(payload.message, context)
+        answer = await ai.generate(payload.message, "\n\n".join(context_parts) or None)
     except RuntimeError as exc:
         await db.rollback()
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -97,8 +145,7 @@ async def add_note(session_id: UUID, payload: dict, db: AsyncSession = Depends(g
     content = str(payload.get("content", "")).strip()
     if not content:
         raise HTTPException(status_code=400, detail="content is required")
-    note_type = str(payload.get("note_type", "insight"))
-    await interview_intelligence.add_note(db, session_id, content, note_type)
+    await interview_intelligence.add_note(db, session_id, content, str(payload.get("note_type", "insight")))
     return {"status": "saved", "session_id": str(session_id)}
 
 
