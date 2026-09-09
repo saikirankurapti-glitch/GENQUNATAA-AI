@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from .auth import current_user
 from .db import get_db
@@ -78,7 +79,13 @@ async def upload_document(file: UploadFile = File(...), db: AsyncSession = Depen
 
 @router.get("", response_model=list[DocumentOut])
 async def list_documents(db: AsyncSession = Depends(get_db), user: UserRecord = Depends(current_user)) -> list[DocumentOut]:
-    result = await db.execute(select(Document).where(Document.user_id == user.id).order_by(Document.created_at.desc()))
+    statement = (
+        select(Document)
+        .options(selectinload(Document.chunks))
+        .where(Document.user_id == user.id)
+        .order_by(Document.created_at.desc())
+    )
+    result = await db.execute(statement)
     return [DocumentOut(id=d.id, filename=d.filename, content_type=d.content_type, characters=len(d.content), chunks=len(d.chunks)) for d in result.scalars().all()]
 
 
