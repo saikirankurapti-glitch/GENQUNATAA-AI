@@ -11,9 +11,10 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import delete, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .config import get_settings
 from .db import SessionLocal, get_db
 from .db_models import AuthSessionRecord, UserRecord
 
@@ -23,6 +24,7 @@ _SESSION_COOKIE = "genquantaa_session"
 _SESSION_TTL = timedelta(days=7)
 _SECRET = os.getenv("AUTH_SECRET", "development-only-change-me")
 _PASSWORD_HASHER = PasswordHasher()
+_SETTINGS = get_settings()
 
 
 def _hash_password(password: str) -> str:
@@ -44,8 +46,6 @@ def _needs_password_rehash(stored: str) -> bool:
 
 
 def _token(user_id: UUID, expires: datetime, secret: str | None = None) -> str:
-    # Include a random nonce so multiple logins in the same second never
-    # generate the same server-side session token.
     nonce = secrets.token_urlsafe(16)
     payload = f"{user_id}:{int(expires.timestamp())}:{nonce}"
     signature = hmac.new((secret or _SECRET).encode(), payload.encode(), "sha256").hexdigest()
@@ -72,7 +72,6 @@ def _decode(token: str) -> tuple[UUID, datetime] | None:
 
 
 def _utc(value: datetime | None) -> datetime | None:
-    """Normalize DB datetimes for SQLite/PostgreSQL timezone differences."""
     if value is None:
         return None
     if value.tzinfo is None:
@@ -110,6 +109,7 @@ class UserOut(BaseModel):
     id: UUID
     email: str
     name: str
+    role: str
 
 
 class AuthSessionOut(BaseModel):
@@ -133,7 +133,6 @@ def _device_from_user_agent(user_agent: str | None) -> str:
         browser = "Safari"
     else:
         browser = "Browser"
-
     if "iphone" in value:
         platform = "iPhone"
     elif "ipad" in value:
@@ -149,6 +148,15 @@ def _device_from_user_agent(user_agent: str | None) -> str:
     else:
         platform = "Unknown device"
     return f"{browser} · {platform}"
+
+
+def _configured_role(email: str) -> str:
+    normalized = email.lower().strip()
+    if normalized in _SETTINGS.bootstrap_admin_email_list:
+        return "admin"
+    if normalized in _SETTINGS.bootstrap_cto_email_list:
+        return "cto"
+    return "team_member"
 
 
 async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> UserRecord:
@@ -177,29 +185,14 @@ async def websocket_user(websocket: WebSocket) -> UserRecord | None:
 
 
 def public_user(user: UserRecord) -> UserOut:
-    return UserOut(id=user.id, email=user.email, name=user.name)
+    return UserOut(id=user.id, email=user.email, name=user.name, role=user.role)
 
 
 def set_session(response: Response, user_id: UUID, db: AsyncSession, user_agent: str | None = None) -> None:
     expires = datetime.now(timezone.utc) + _SESSION_TTL
     token = _token(user_id, expires)
-    db.add(
-        AuthSessionRecord(
-            user_id=user_id,
-            token_hash=_token_hash(token),
-            expires_at=expires,
-            user_agent=(user_agent or "")[:1000],
-        )
-    )
-    response.set_cookie(
-        _SESSION_COOKIE,
-        token,
-        max_age=int(_SESSION_TTL.total_seconds()),
-        httponly=True,
-        secure=os.getenv("APP_ENV", "development").lower() in {"production", "prod"},
-        samesite="lax",
-        path="/",
-    )
+    db.add(AuthSessionRecord(user_id=user_id, token_hash=_token_hash(token), expires_at=expires, user_agent=(user_agent or "")[:1000]))
+    response.set_cookie(_SESSION_COOKIE, token, max_age=int(_SESSION_TTL.total_seconds()), httponly=True, secure=os.getenv("APP_ENV", "development").lower() in {"production", "prod"}, samesite="lax", path="/")
 
 
 @router.post("/register", response_model=UserOut, status_code=201)
@@ -207,7 +200,7 @@ async def register(payload: RegisterRequest, request: Request, response: Respons
     email = str(payload.email).lower().strip()
     if await db.scalar(select(UserRecord).where(UserRecord.email == email)):
         raise HTTPException(status_code=409, detail="Email is already registered")
-    user = UserRecord(email=email, name=payload.name.strip() or email.split("@", 1)[0], password_hash=_hash_password(payload.password))
+    user = UserRecord(email=email, name=payload.name.strip() or email.split("@", 1)[0], password_hash=_hash_password(payload.password), role=_configured_role(email))
     db.add(user)
     await db.flush()
     set_session(response, user.id, db, request.headers.get("user-agent"))
@@ -224,6 +217,9 @@ async def login(payload: LoginRequest, request: Request, response: Response, db:
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if _needs_password_rehash(user.password_hash):
         user.password_hash = _hash_password(payload.password)
+    configured_role = _configured_role(email)
+    if configured_role != "team_member" and user.role != configured_role:
+        user.role = configured_role
     user.last_login_at = datetime.now(timezone.utc)
     set_session(response, user.id, db, request.headers.get("user-agent"))
     await db.commit()
@@ -235,41 +231,16 @@ async def list_sessions(request: Request, user: UserRecord = Depends(current_use
     token = request.cookies.get(_SESSION_COOKIE)
     current_hash = _token_hash(token) if token else None
     now = datetime.now(timezone.utc)
-    sessions = (
-        await db.scalars(
-            select(AuthSessionRecord)
-            .where(
-                AuthSessionRecord.user_id == user.id,
-                AuthSessionRecord.revoked_at.is_(None),
-                AuthSessionRecord.expires_at > now,
-            )
-            .order_by(AuthSessionRecord.created_at.desc())
-        )
-    ).all()
-    return [
-        AuthSessionOut(
-            id=session.id,
-            created_at=_utc(session.created_at) or now,
-            last_seen_at=_utc(session.last_seen_at),
-            expires_at=_utc(session.expires_at) or now,
-            current=session.token_hash == current_hash,
-            device=_device_from_user_agent(session.user_agent),
-        )
-        for session in sessions
-    ]
+    sessions = (await db.scalars(select(AuthSessionRecord).where(AuthSessionRecord.user_id == user.id, AuthSessionRecord.revoked_at.is_(None)).order_by(AuthSessionRecord.created_at.desc()))).all()
+    active = [x for x in sessions if (_utc(x.expires_at) or now) > now]
+    return [AuthSessionOut(id=x.id, created_at=_utc(x.created_at) or now, last_seen_at=_utc(x.last_seen_at), expires_at=_utc(x.expires_at) or now, current=x.token_hash == current_hash, device=_device_from_user_agent(x.user_agent)) for x in active]
 
 
 @router.delete("/sessions/{session_id}")
 async def revoke_session(session_id: UUID, request: Request, response: Response, user: UserRecord = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict[str, bool | str]:
     token = request.cookies.get(_SESSION_COOKIE)
     current_hash = _token_hash(token) if token else None
-    session = await db.scalar(
-        select(AuthSessionRecord).where(
-            AuthSessionRecord.id == session_id,
-            AuthSessionRecord.user_id == user.id,
-            AuthSessionRecord.revoked_at.is_(None),
-        )
-    )
+    session = await db.scalar(select(AuthSessionRecord).where(AuthSessionRecord.id == session_id, AuthSessionRecord.user_id == user.id, AuthSessionRecord.revoked_at.is_(None)))
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     is_current = session.token_hash == current_hash
@@ -282,12 +253,7 @@ async def revoke_session(session_id: UUID, request: Request, response: Response,
 
 @router.post("/sessions/revoke-all")
 async def revoke_all_sessions(request: Request, response: Response, user: UserRecord = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict[str, int | str]:
-    now = datetime.now(timezone.utc)
-    result = await db.execute(
-        update(AuthSessionRecord)
-        .where(AuthSessionRecord.user_id == user.id, AuthSessionRecord.revoked_at.is_(None))
-        .values(revoked_at=now)
-    )
+    result = await db.execute(update(AuthSessionRecord).where(AuthSessionRecord.user_id == user.id, AuthSessionRecord.revoked_at.is_(None)).values(revoked_at=datetime.now(timezone.utc)))
     await db.commit()
     response.delete_cookie(_SESSION_COOKIE, path="/")
     return {"status": "all_sessions_revoked", "revoked_count": result.rowcount or 0}
@@ -297,11 +263,7 @@ async def revoke_all_sessions(request: Request, response: Response, user: UserRe
 async def logout(request: Request, response: Response, db: AsyncSession = Depends(get_db)) -> dict[str, str]:
     token = request.cookies.get(_SESSION_COOKIE)
     if token:
-        await db.execute(
-            update(AuthSessionRecord)
-            .where(AuthSessionRecord.token_hash == _token_hash(token), AuthSessionRecord.revoked_at.is_(None))
-            .values(revoked_at=datetime.now(timezone.utc))
-        )
+        await db.execute(update(AuthSessionRecord).where(AuthSessionRecord.token_hash == _token_hash(token), AuthSessionRecord.revoked_at.is_(None)).values(revoked_at=datetime.now(timezone.utc)))
         await db.commit()
     response.delete_cookie(_SESSION_COOKIE, path="/")
     return {"status": "logged_out"}
