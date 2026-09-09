@@ -68,7 +68,13 @@ async def upload_resume(file: UploadFile = File(...), db: AsyncSession = Depends
                 vector = await embedding_service.embed(chunk)
             except Exception:
                 vector = []
-        db.add(DocumentChunk(document_id=document.id, chunk_index=index, content=chunk, embedding=serialize_embedding(vector) if vector else None))
+        db.add(DocumentChunk(
+            document_id=document.id,
+            chunk_index=index,
+            content=chunk,
+            embedding=serialize_embedding(vector) if vector else None,
+            embedding_vector=vector or None,
+        ))
     await db.commit()
     return ResumeOut(id=document.id, filename=document.filename, name=name, email=email, skills=skills, experience_years=years)
 
