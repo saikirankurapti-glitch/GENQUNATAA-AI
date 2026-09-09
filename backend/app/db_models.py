@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -11,7 +11,6 @@ from .db import Base
 
 class SessionRecord(Base):
     __tablename__ = "sessions"
-
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     title: Mapped[str] = mapped_column(String(200), default="Untitled session")
     mode: Mapped[str] = mapped_column(String(50), default="copilot")
@@ -21,7 +20,6 @@ class SessionRecord(Base):
 
 class MessageRecord(Base):
     __tablename__ = "messages"
-
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     session_id: Mapped[UUID] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(20))
@@ -31,7 +29,6 @@ class MessageRecord(Base):
 
 class Document(Base):
     __tablename__ = "documents"
-
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     filename: Mapped[str] = mapped_column(String(255))
     content_type: Mapped[str] = mapped_column(String(100))
@@ -42,9 +39,18 @@ class Document(Base):
 
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
-
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     document_id: Mapped[UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
     chunk_index: Mapped[int]
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ResumeProfile(Base):
+    __tablename__ = "resume_profiles"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    document_id: Mapped[UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), unique=True, index=True)
+    name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    skills: Mapped[str] = mapped_column(Text, default="")
+    experience_years: Mapped[float | None] = mapped_column(Float, nullable=True)
