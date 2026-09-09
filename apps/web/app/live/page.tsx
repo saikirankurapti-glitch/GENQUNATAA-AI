@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { ArrowLeft, Brain, CheckCircle2, FileText, Mic, MicOff, Radio, Send, Settings2, Square } from "lucide-react";
 
 type SourceDetail = { filename: string; score: number; snippet: string };
@@ -12,16 +13,19 @@ declare global { interface Window { genquantaa?: { publishCopilotUpdate?: (paylo
 function pcm16(input: Float32Array) { const pcm = new Int16Array(input.length); for (let i = 0; i < input.length; i += 1) { const x = Math.max(-1, Math.min(1, input[i])); pcm[i] = x < 0 ? x * 0x8000 : x * 0x7fff; } const bytes = new Uint8Array(pcm.buffer); let binary = ""; for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + 0x8000, bytes.length))); return btoa(binary); }
 
 export default function LivePage() {
+  const params = useSearchParams();
   const ws = useRef<WebSocket | null>(null); const ctx = useRef<AudioContext | null>(null); const processor = useRef<ScriptProcessorNode | null>(null); const source = useRef<MediaStreamAudioSourceNode | null>(null); const stream = useRef<MediaStream | null>(null);
   const [connected, setConnected] = useState(false); const [listening, setListening] = useState(false); const [input, setInput] = useState(""); const [answer, setAnswer] = useState(""); const [transcript, setTranscript] = useState(""); const [interim, setInterim] = useState(""); const [detectedQuestion, setDetectedQuestion] = useState(""); const [autoStatus, setAutoStatus] = useState("Waiting for a question"); const [error, setError] = useState(""); const [sessionId, setSessionId] = useState(""); const [analysis, setAnalysis] = useState<Analysis[]>([]); const [notes, setNotes] = useState<string[]>([]); const [summary, setSummary] = useState<Summary | null>(null);
-  const [autoAnswer, setAutoAnswer] = useState(true); const [answerMode, setAnswerMode] = useState("concise");
+  const [autoAnswer, setAutoAnswer] = useState(params.get("auto_answer") !== "0"); const [answerMode, setAnswerMode] = useState(params.get("answer_mode") || "concise");
+  const provider = params.get("provider");
+  const orchestratedSession = params.get("session");
 
   function publishToDesktop(payload: unknown) { void window.genquantaa?.publishCopilotUpdate?.(payload); }
   function sendSettings(nextAutoAnswer = autoAnswer, nextMode = answerMode) { if (ws.current?.readyState === WebSocket.OPEN) ws.current.send(JSON.stringify({ type: "settings", auto_answer: nextAutoAnswer, answer_mode: nextMode })); }
 
   function connect() {
     const api = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"; const socket = new WebSocket(api.replace(/^http/, "ws") + "/api/v1/realtime/ws"); ws.current = socket;
-    socket.onopen = () => { setConnected(true); setError(""); setAutoStatus(autoAnswer ? "Listening for interviewer questions" : "Manual answer mode"); socket.send(JSON.stringify({ type: "start", auto_answer: autoAnswer, answer_mode: answerMode })); };
+    socket.onopen = () => { setConnected(true); setError(""); setAutoStatus(autoAnswer ? "Listening for interviewer questions" : "Manual answer mode"); socket.send(JSON.stringify({ type: "start", session_id: orchestratedSession || undefined, auto_answer: autoAnswer, answer_mode: answerMode })); };
     socket.onclose = () => { setConnected(false); setListening(false); setAutoStatus("Session ended"); }; socket.onerror = () => setError("Live connection failed. Check the backend and GEMINI_API_KEY.");
     socket.onmessage = (event) => { const data = JSON.parse(event.data);
       if (data.type === "session") { setSessionId(data.session_id); setAutoAnswer(Boolean(data.auto_answer)); setAnswerMode(data.answer_mode || "concise"); }
@@ -45,6 +49,7 @@ export default function LivePage() {
 
   return <main className="main">
     <div className="top"><div><div className="eyebrow">Interview intelligence v2</div><h1 className="title">Real-time Copilot</h1><div className="subtitle">Live transcript → question boundary → resume/RAG retrieval → grounded answer → desktop overlay.</div></div><span className="pill"><Radio size={14} /> {connected ? "Connected" : "Offline"}</span></div>
+    {provider && <div className="card" style={{ marginBottom: 18 }}><strong>Orchestrated session:</strong> {provider.replace("-", " ")} · {orchestratedSession ? "session created" : "new session"}</div>}
     {error && <div className="card" style={{ marginBottom: 18 }}>{error}</div>}
     <div className="grid"><section>
       <div className="card hero"><div><div className="eyebrow">Live transcription</div><h2>{transcript || "Your interviewer speech will appear here."}</h2>{interim && <p className="muted">{interim}</p>}<p className="subtitle">{autoStatus}. Answers are generated only after a detected question boundary and grounded against available resume/knowledge sources.</p>{detectedQuestion && <div className="row" style={{ marginTop: 12 }}><span><strong>Detected:</strong> {detectedQuestion}</span></div>}</div><div className="actions">{!connected ? <button className="primary" onClick={connect}><Radio size={16} /> Connect Live</button> : <button className="secondary" onClick={() => { stopMic(); ws.current?.close(); }}><Square size={16} /> End Session</button>}{connected && <button className={listening ? "primary" : "secondary"} onClick={listening ? stopMic : startMic}>{listening ? <MicOff size={16} /> : <Mic size={16} />} {listening ? "Stop microphone" : "Start microphone"}</button>}</div></div>
