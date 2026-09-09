@@ -42,6 +42,19 @@ class AuthSessionRecord(Base):
     user_agent: Mapped[str] = mapped_column(String(1000), default="")
 
 
+class AuditLogRecord(Base):
+    __tablename__ = "audit_logs"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    actor_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True)
+    action: Mapped[str] = mapped_column(String(100), index=True)
+    resource_type: Mapped[str] = mapped_column(String(100), default="")
+    resource_id: Mapped[str] = mapped_column(String(100), default="")
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    ip_address: Mapped[str] = mapped_column(String(64), default="")
+    user_agent: Mapped[str] = mapped_column(String(1000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 class SessionRecord(Base):
     __tablename__ = "sessions"
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
