@@ -55,3 +55,31 @@ async def init_db() -> None:
             await conn.execute(text("ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS ideal_answer text NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS coaching_feedback text NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS predicted_follow_ups text NOT NULL DEFAULT '[]'"))
+            for statement in (
+                "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS candidate_answer text NOT NULL DEFAULT ''",
+                "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS candidate_score double precision NOT NULL DEFAULT 0",
+                "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS correctness_score double precision NOT NULL DEFAULT 0",
+                "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS relevance_score double precision NOT NULL DEFAULT 0",
+                "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS completeness_score double precision NOT NULL DEFAULT 0",
+                "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS structure_score double precision NOT NULL DEFAULT 0",
+                "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS technical_depth_score double precision NOT NULL DEFAULT 0",
+                "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS communication_score double precision NOT NULL DEFAULT 0",
+                "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS evaluation_feedback text NOT NULL DEFAULT ''",
+            ):
+                await conn.execute(text(statement))
+        elif conn.dialect.name == "sqlite":
+            columns = {str(row[1]) for row in (await conn.execute(text("PRAGMA table_info(interview_questions)"))).fetchall()}
+            additions = {
+                "candidate_answer": "TEXT NOT NULL DEFAULT ''",
+                "candidate_score": "REAL NOT NULL DEFAULT 0",
+                "correctness_score": "REAL NOT NULL DEFAULT 0",
+                "relevance_score": "REAL NOT NULL DEFAULT 0",
+                "completeness_score": "REAL NOT NULL DEFAULT 0",
+                "structure_score": "REAL NOT NULL DEFAULT 0",
+                "technical_depth_score": "REAL NOT NULL DEFAULT 0",
+                "communication_score": "REAL NOT NULL DEFAULT 0",
+                "evaluation_feedback": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    await conn.execute(text(f"ALTER TABLE interview_questions ADD COLUMN {name} {definition}"))
