@@ -11,33 +11,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .ai import GeminiService
 from .auth import current_user
 from .db import get_db
-from .db_models import InterviewQuestion, ResumeProfile, SessionRecord, UserRecord
+from .db_models import Document, InterviewQuestion, ResumeProfile, SessionRecord, UserRecord
 
 router = APIRouter(prefix="/api/v1/adaptive", tags=["adaptive-interview"])
 
 class AdaptiveInterviewer:
     DIFFICULTIES = ("easy", "medium", "hard", "expert")
+    QUESTION_TYPES = ("technical", "behavioral", "system_design", "coding", "project", "general")
 
     def __init__(self) -> None:
         self.ai = GeminiService()
 
     async def next_question(self, db: AsyncSession, session: SessionRecord, user: UserRecord, target_role: str = "Data Engineer", focus: str = "adaptive") -> dict[str, Any]:
         questions = (await db.execute(select(InterviewQuestion).where(InterviewQuestion.session_id == session.id).order_by(InterviewQuestion.created_at))).scalars().all()
-        profile = await db.scalar(select(ResumeProfile).join(ResumeProfile.document).where(ResumeProfile.document.has(user_id=user.id)).order_by(ResumeProfile.id.desc()))
-        history = []
-        for q in questions[-10:]:
-            history.append({"question": q.transcript, "type": q.question_type, "difficulty": q.difficulty, "candidate_score": q.candidate_score, "missing": q.missing_concepts})
-        prompt = f"""You are GenQuantaa's adaptive interviewer engine. Select the NEXT interview question based on the candidate's demonstrated performance, not a fixed sequence.
+        profile = (await db.execute(select(ResumeProfile).join(Document, ResumeProfile.document_id == Document.id).where(Document.user_id == user.id).order_by(ResumeProfile.id.desc()).limit(1))).scalar_one_or_none()
+        history = [{"question": q.transcript, "type": q.question_type, "difficulty": q.difficulty, "candidate_score": q.candidate_score, "missing": q.missing_concepts} for q in questions[-10:]]
+        prompt = f"""You are GenQuantaa's adaptive interviewer engine. Select the NEXT interview question based on demonstrated candidate performance, not a fixed sequence.
 Target role: {target_role}
 Focus preference: {focus}
 Candidate profile skills: {profile.skills if profile else 'unknown'}
 Previous questions and evaluation results: {json.dumps(history)}
 
 Rules:
-- If the last answer was weak, ask a targeted remediation question or a simpler probing question.
-- If strong, increase difficulty or probe a deeper trade-off.
+- If the last answer was weak (especially below 0.60), ask a targeted remediation/probing question or reduce difficulty one level.
+- If strong (especially above 0.80), increase difficulty or probe a deeper trade-off.
 - Avoid repeating the same question or concept unless deliberately testing remediation.
-- Maintain realistic interview progression across fundamentals, implementation, troubleshooting, architecture and behavioral/project areas.
+- Progress naturally across fundamentals, implementation, troubleshooting, architecture and behavioral/project areas.
 - Use resume evidence when available, but never invent candidate experience.
 - Return ONLY JSON.
 Keys: question, question_type (technical|behavioral|system_design|coding|project|general), difficulty (easy|medium|hard|expert), focus_area, rationale, expected_concepts (array), follow_up_strategy.
@@ -51,6 +50,7 @@ Keys: question, question_type (technical|behavioral|system_design|coding|project
             try: result = json.loads(response.text or "{}")
             except json.JSONDecodeError: pass
         if result.get("difficulty") not in self.DIFFICULTIES: result["difficulty"] = "medium"
+        if result.get("question_type") not in self.QUESTION_TYPES: result["question_type"] = "general"
         return {"session_id": str(session.id), "sequence": len(questions) + 1, "adaptive": bool(questions), **result}
 
 engine = AdaptiveInterviewer()
@@ -58,6 +58,7 @@ engine = AdaptiveInterviewer()
 @router.post("/sessions/{session_id}/next")
 async def next_question(session_id: UUID, payload: dict[str, Any] | None = None, db: AsyncSession = Depends(get_db), user: UserRecord = Depends(current_user)) -> dict[str, Any]:
     session = await db.scalar(select(SessionRecord).where(SessionRecord.id == session_id, SessionRecord.user_id == user.id))
-    if not session: raise HTTPException(status_code=404, detail="Session not found")
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
     payload = payload or {}
     return await engine.next_question(db, session, user, str(payload.get("target_role", "Data Engineer")), str(payload.get("focus", "adaptive")))
