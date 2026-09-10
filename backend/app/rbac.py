@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .audit import record_audit
 from .auth import current_user
 from .config import get_settings
 from .db import get_db
@@ -85,6 +84,7 @@ async def list_users(user: UserRecord = Depends(require_roles("admin", "cto")), 
 
 @router.patch("/users/{user_id}/role", response_model=AdminUserOut)
 async def update_role(user_id: UUID, payload: RoleUpdate, request: Request, actor: UserRecord = Depends(require_roles("admin", "cto")), db: AsyncSession = Depends(get_db)) -> AdminUserOut:
+    from .audit import record_audit
     target = await db.get(UserRecord, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -104,6 +104,7 @@ async def update_role(user_id: UUID, payload: RoleUpdate, request: Request, acto
 
 @router.patch("/users/{user_id}/status", response_model=AdminUserOut)
 async def update_status(user_id: UUID, payload: StatusUpdate, request: Request, actor: UserRecord = Depends(require_roles("admin", "cto")), db: AsyncSession = Depends(get_db)) -> AdminUserOut:
+    from .audit import record_audit
     target = await db.get(UserRecord, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
