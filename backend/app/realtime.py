@@ -11,9 +11,10 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
 from .auth import websocket_user
+from .candidate_evaluation import evaluator
 from .config import get_settings
 from .db import SessionLocal
-from .db_models import SessionRecord
+from .db_models import InterviewQuestion, SessionRecord
 from .intelligence import InterviewIntelligence
 from .question_boundary import QuestionBoundaryDetector
 from .visual_fusion import visual_copilot_fusion
@@ -37,9 +38,6 @@ async def _create_session(user_id: UUID) -> UUID:
 
 @router.websocket("/ws")
 async def realtime_socket(websocket: WebSocket) -> None:
-    # Authenticate before accepting the socket so an unauthenticated client never
-    # gets a usable realtime channel. Credentials are read only from the HttpOnly
-    # session cookie; tokens are never accepted in query parameters.
     user = await websocket_user(websocket)
     if not user:
         await websocket.close(code=1008, reason="Authentication required")
@@ -69,10 +67,34 @@ async def realtime_socket(websocket: WebSocket) -> None:
         answer_mode = "concise"
         visual_context: dict[str, Any] | None = None
         detector = QuestionBoundaryDetector()
+        active_question_id: UUID | None = None
+        candidate_buffer: list[str] = []
+        capture_mode = "auto"
+
+        async def finalize_candidate() -> None:
+            nonlocal active_question_id, candidate_buffer
+            if not session_id or not active_question_id or not candidate_buffer:
+                return
+            candidate_answer = " ".join(candidate_buffer).strip()
+            candidate_buffer = []
+            if len(candidate_answer) < 8:
+                return
+            try:
+                async with SessionLocal() as db:
+                    question = await db.scalar(select(InterviewQuestion).where(InterviewQuestion.id == active_question_id, InterviewQuestion.session_id == session_id))
+                    if not question:
+                        return
+                    result = await evaluator.evaluate(db, question, candidate_answer)
+                await websocket.send_json({"type": "candidate_answer", "data": result})
+            except Exception as exc:
+                with contextlib.suppress(Exception):
+                    await websocket.send_json({"type": "candidate_evaluation_error", "message": str(exc)})
+            finally:
+                active_question_id = None
 
         async with client.aio.live.connect(model=settings.gemini_model, config=config) as session:
             async def receive_client() -> None:
-                nonlocal session_id, auto_answer, answer_mode, visual_context
+                nonlocal session_id, auto_answer, answer_mode, visual_context, capture_mode, candidate_buffer
                 while True:
                     message: dict[str, Any] = json.loads(await websocket.receive_text())
                     kind = message.get("type")
@@ -82,9 +104,10 @@ async def realtime_socket(websocket: WebSocket) -> None:
                         auto_answer = bool(message.get("auto_answer", True))
                         requested_mode = str(message.get("answer_mode", "concise"))
                         answer_mode = requested_mode if requested_mode in InterviewIntelligence.ANSWER_MODES else "concise"
+                        requested_capture = str(message.get("candidate_capture", "auto"))
+                        capture_mode = requested_capture if requested_capture in {"auto", "speaker_tagged", "off"} else "auto"
                         candidate_visual = message.get("visual_context")
                         visual_context = candidate_visual if isinstance(candidate_visual, dict) else None
-
                         if raw_id:
                             try:
                                 candidate = UUID(str(raw_id))
@@ -97,23 +120,27 @@ async def realtime_socket(websocket: WebSocket) -> None:
                             session_id = candidate
                         elif session_id is None:
                             session_id = await _create_session(user.id)
-
-                        detector.reset()
-                        await websocket.send_json({
-                            "type": "session",
-                            "session_id": str(session_id),
-                            "auto_answer": auto_answer,
-                            "answer_mode": answer_mode,
-                            "visual_context_active": bool(visual_context),
-                        })
+                        detector.reset(); active_question_id = None; candidate_buffer = []
+                        await websocket.send_json({"type": "session", "session_id": str(session_id), "auto_answer": auto_answer, "answer_mode": answer_mode, "visual_context_active": bool(visual_context), "candidate_capture": capture_mode})
 
                     elif kind == "settings":
                         auto_answer = bool(message.get("auto_answer", auto_answer))
                         requested_mode = str(message.get("answer_mode", answer_mode))
                         answer_mode = requested_mode if requested_mode in InterviewIntelligence.ANSWER_MODES else answer_mode
+                        requested_capture = str(message.get("candidate_capture", capture_mode))
+                        capture_mode = requested_capture if requested_capture in {"auto", "speaker_tagged", "off"} else capture_mode
                         if isinstance(message.get("visual_context"), dict):
                             visual_context = message["visual_context"]
-                        await websocket.send_json({"type": "settings", "auto_answer": auto_answer, "answer_mode": answer_mode, "visual_context_active": bool(visual_context)})
+                        await websocket.send_json({"type": "settings", "auto_answer": auto_answer, "answer_mode": answer_mode, "visual_context_active": bool(visual_context), "candidate_capture": capture_mode})
+
+                    elif kind == "candidate_text":
+                        text = str(message.get("text", "")).strip()
+                        if text and capture_mode != "off" and active_question_id:
+                            candidate_buffer.append(text)
+                            await websocket.send_json({"type": "candidate_capture", "active": True, "chars": sum(len(x) for x in candidate_buffer)})
+
+                    elif kind == "candidate_end":
+                        await finalize_candidate()
 
                     elif kind == "visual_context":
                         candidate_visual = message.get("data")
@@ -151,9 +178,12 @@ async def realtime_socket(websocket: WebSocket) -> None:
                         await session.send_realtime_input(audio_stream_end=True)
 
             async def analyze_and_send(boundary: Any) -> None:
+                nonlocal active_question_id, candidate_buffer
                 if not session_id or not auto_answer:
                     return
                 try:
+                    if active_question_id and candidate_buffer:
+                        await finalize_candidate()
                     await websocket.send_json({"type": "question_detected", "data": {"text": boundary.text, "confidence": boundary.confidence, "reason": boundary.reason, "visual_context_active": bool(visual_context)}})
                     if not await _owned_session(session_id, user.id):
                         await websocket.send_json({"type": "intelligence_error", "message": "Session is no longer available"})
@@ -163,7 +193,10 @@ async def realtime_socket(websocket: WebSocket) -> None:
                             result = await visual_copilot_fusion.analyze(db, session_id, boundary.text, visual_context, detection_confidence=boundary.confidence, detection_reason=boundary.reason, answer_mode=answer_mode, user_id=user.id)
                         else:
                             result = await InterviewIntelligence().analyze_question(db, session_id, boundary.text, detection_confidence=boundary.confidence, detection_reason=boundary.reason, answer_mode=answer_mode, user_id=user.id)
+                    active_question_id = UUID(str(result["id"])) if result.get("id") else None
+                    candidate_buffer = []
                     await websocket.send_json({"type": "question_analysis", "data": result})
+                    await websocket.send_json({"type": "candidate_capture", "active": bool(active_question_id), "question_id": str(active_question_id) if active_question_id else None})
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -176,6 +209,7 @@ async def realtime_socket(websocket: WebSocket) -> None:
                 task.add_done_callback(analysis_tasks.discard)
 
             async def send_model() -> None:
+                nonlocal candidate_buffer
                 async for response in session.receive():
                     server = getattr(response, "server_content", None)
                     if server:
@@ -188,6 +222,9 @@ async def realtime_socket(websocket: WebSocket) -> None:
                             if transcript:
                                 detector.add(transcript)
                                 await websocket.send_json({"type": "transcript", "text": transcript})
+                                if capture_mode != "off" and active_question_id and not InterviewIntelligence.looks_like_question(transcript):
+                                    candidate_buffer.append(transcript)
+                                    await websocket.send_json({"type": "candidate_capture", "active": True, "chars": sum(len(x) for x in candidate_buffer)})
                                 if "?" in transcript:
                                     boundary = detector.flush()
                                     if boundary:
@@ -196,7 +233,7 @@ async def realtime_socket(websocket: WebSocket) -> None:
                         if output and getattr(output, "text", None):
                             await websocket.send_json({"type": "text", "text": output.text})
                         if getattr(server, "interrupted", False):
-                            detector.reset()
+                            detector.reset(); candidate_buffer = []
                             await websocket.send_json({"type": "interrupted"})
                         if getattr(server, "turn_complete", False):
                             boundary = detector.flush()
