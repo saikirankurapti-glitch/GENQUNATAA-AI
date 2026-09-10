@@ -1,18 +1,19 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .audit import record_audit
 from .auth import current_user
 from .config import get_settings
 from .db import get_db
-from .db_models import UserRecord
+from .db_models import AuthSessionRecord, UserRecord
 
 Role = Literal["admin", "cto", "manager", "team_member"]
 ROLES: tuple[str, ...] = ("admin", "cto", "manager", "team_member")
@@ -30,6 +31,10 @@ settings = get_settings()
 
 class RoleUpdate(BaseModel):
     role: Role
+
+
+class StatusUpdate(BaseModel):
+    is_active: bool
 
 
 class AdminUserOut(BaseModel):
@@ -92,6 +97,27 @@ async def update_role(user_id: UUID, payload: RoleUpdate, request: Request, acto
     previous_role = target.role
     target.role = payload.role
     await record_audit(db, request, "role_changed", actor.id, "user", str(target.id), {"from_role": previous_role, "to_role": target.role})
+    await db.commit()
+    await db.refresh(target)
+    return AdminUserOut(id=target.id, email=target.email, name=target.name, role=target.role, is_active=target.is_active)
+
+
+@router.patch("/users/{user_id}/status", response_model=AdminUserOut)
+async def update_status(user_id: UUID, payload: StatusUpdate, request: Request, actor: UserRecord = Depends(require_roles("admin", "cto")), db: AsyncSession = Depends(get_db)) -> AdminUserOut:
+    target = await db.get(UserRecord, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.id == actor.id:
+        raise HTTPException(status_code=400, detail="You cannot deactivate or reactivate your own account")
+    if actor.role == "cto" and ROLE_RANK.get(target.role, 0) > ROLE_RANK["manager"]:
+        raise HTTPException(status_code=403, detail="CTO cannot change an admin or CTO account")
+    if target.is_active == payload.is_active:
+        return AdminUserOut(id=target.id, email=target.email, name=target.name, role=target.role, is_active=target.is_active)
+    target.is_active = payload.is_active
+    if not payload.is_active:
+        await db.execute(update(AuthSessionRecord).where(AuthSessionRecord.user_id == target.id, AuthSessionRecord.revoked_at.is_(None)).values(revoked_at=datetime.now(timezone.utc)))
+    action = "user_activated" if payload.is_active else "user_deactivated"
+    await record_audit(db, request, action, actor.id, "user", str(target.id), {"email": target.email})
     await db.commit()
     await db.refresh(target)
     return AdminUserOut(id=target.id, email=target.email, name=target.name, role=target.role, is_active=target.is_active)
