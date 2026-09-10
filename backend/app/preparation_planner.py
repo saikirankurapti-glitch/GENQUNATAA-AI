@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .ai import GeminiService
 from .auth import current_user
 from .db import get_db
-from .db_models import ResumeProfile, UserRecord
+from .db_models import Document, ResumeProfile, UserRecord
 
 router = APIRouter(prefix="/api/v1/preparation", tags=["preparation"])
 
@@ -19,7 +19,7 @@ class PreparationPlanner:
         self.ai = GeminiService()
 
     async def build(self, db: AsyncSession, user: UserRecord, target_role: str, job_description: str, available_minutes: int) -> dict[str, Any]:
-        profile = await db.scalar(select(ResumeProfile).join(ResumeProfile.document).where(ResumeProfile.document.has(user_id=user.id)).order_by(ResumeProfile.id.desc()))
+        profile = await db.scalar(select(ResumeProfile).join(Document, ResumeProfile.document_id == Document.id).where(Document.user_id == user.id).order_by(ResumeProfile.id.desc()))
         skills = profile.skills if profile else "unknown"
         prompt = f'''You are GenQuantaa's personalized interview preparation planner.
 Target role: {target_role}
@@ -32,12 +32,12 @@ Create an executable preparation plan. Prioritize high-impact gaps and realistic
         if self.ai.api_key:
             from google import genai
             from google.genai import types
-            response = await genai.Client(api_key=self.ai.api_key).aio.models.generate_content(model=self.ai.model, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
             try:
+                response = await genai.Client(api_key=self.ai.api_key).aio.models.generate_content(model=self.ai.model, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
                 parsed = json.loads(response.text or "{}")
                 if isinstance(parsed, dict): result = {**fallback, **parsed}
-            except json.JSONDecodeError:
-                pass
+            except Exception:
+                result = fallback
         result["target_role"] = target_role
         result["candidate_skills"] = skills
         result["available_minutes"] = available_minutes
@@ -49,7 +49,10 @@ planner = PreparationPlanner()
 async def plan(payload: dict[str, Any], db: AsyncSession = Depends(get_db), user: UserRecord = Depends(current_user)) -> dict[str, Any]:
     role = str(payload.get("target_role", "Data Engineer")).strip() or "Data Engineer"
     jd = str(payload.get("job_description", "")).strip()
-    minutes = int(payload.get("available_minutes", 180))
+    try:
+        minutes = int(payload.get("available_minutes", 180))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="available_minutes must be an integer") from None
     if not jd: raise HTTPException(status_code=400, detail="job_description is required")
     if len(jd) > 30000: raise HTTPException(status_code=400, detail="job_description is too long")
     if minutes < 30 or minutes > 10080: raise HTTPException(status_code=400, detail="available_minutes must be between 30 and 10080")
