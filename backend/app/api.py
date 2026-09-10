@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .ai import GeminiService
 from .auth import current_user
+from .candidate_evaluation import evaluator
 from .db import get_db
 from .db_models import InterviewQuestion, MessageRecord, SessionNote, SessionRecord, UserRecord
 from .intelligence import interview_intelligence
@@ -67,7 +68,8 @@ async def session_detail_analytics(session_id: UUID, db: AsyncSession = Depends(
     questions = (await db.execute(select(InterviewQuestion).where(InterviewQuestion.session_id == record.id).order_by(InterviewQuestion.created_at.desc()))).scalars().all()
     notes = (await db.execute(select(SessionNote).where(SessionNote.session_id == record.id).order_by(SessionNote.created_at.desc()))).scalars().all()
     values = [float(q.confidence or 0) for q in questions]
-    return {"session": to_session(record).model_dump(mode="json"), "question_count": len(questions), "note_count": len(notes), "average_confidence": round(sum(values) / len(values), 3) if values else 0, "high_confidence_questions": sum(1 for value in values if value >= 0.7), "questions": [interview_intelligence.serialize_question(q) for q in questions], "notes": [{"id": str(n.id), "type": n.note_type, "content": n.content, "created_at": n.created_at.isoformat() if n.created_at else None} for n in notes]}
+    candidate_scores = [float(q.candidate_score or 0) for q in questions if q.candidate_answer]
+    return {"session": to_session(record).model_dump(mode="json"), "question_count": len(questions), "note_count": len(notes), "average_confidence": round(sum(values) / len(values), 3) if values else 0, "average_candidate_score": round(sum(candidate_scores) / len(candidate_scores), 3) if candidate_scores else 0, "evaluated_answers": len(candidate_scores), "high_confidence_questions": sum(1 for value in values if value >= 0.7), "questions": [interview_intelligence.serialize_question(q) for q in questions], "notes": [{"id": str(n.id), "type": n.note_type, "content": n.content, "created_at": n.created_at.isoformat() if n.created_at else None} for n in notes]}
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -106,6 +108,24 @@ async def analyze_question(session_id: UUID, payload: dict, db: AsyncSession = D
     if not transcript: raise HTTPException(status_code=400, detail="transcript is required")
     try: return await interview_intelligence.analyze_question(db, session_id, transcript, user_id=user.id)
     except Exception as exc: await db.rollback(); raise HTTPException(status_code=502, detail=f"Interview analysis failed: {exc}") from exc
+
+
+@router.post("/sessions/{session_id}/questions/{question_id}/evaluate")
+async def evaluate_candidate_answer(session_id: UUID, question_id: UUID, payload: dict, db: AsyncSession = Depends(get_db), user: UserRecord = Depends(current_user)) -> dict:
+    await owned_session(db, session_id, user)
+    question = await db.scalar(select(InterviewQuestion).where(InterviewQuestion.id == question_id, InterviewQuestion.session_id == session_id))
+    if not question:
+        raise HTTPException(status_code=404, detail="Interview question not found")
+    candidate_answer = str(payload.get("candidate_answer", "")).strip()
+    if not candidate_answer:
+        raise HTTPException(status_code=400, detail="candidate_answer is required")
+    try:
+        return await evaluator.evaluate(db, question, candidate_answer)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=502, detail=f"Candidate evaluation failed: {exc}") from exc
 
 
 @router.get("/sessions/{session_id}/questions")
