@@ -56,6 +56,35 @@ def test_admin_can_change_role_but_cannot_change_self() -> None:
         assert target.get("/api/v1/rbac/roles").json()["role"] == "manager"
 
 
+def test_admin_can_deactivate_and_reactivate_user() -> None:
+    admin_email = "rbac-status-admin@example.com"
+    target_email = "rbac-status-target@example.com"
+    with TestClient(app) as admin, TestClient(app) as target:
+        register(admin, admin_email)
+        register(target, target_email)
+        set_role(admin_email, "admin")
+        users = admin.get("/api/v1/rbac/users").json()
+        target_user = next(x for x in users if x["email"] == target_email)
+        disabled = admin.patch(f"/api/v1/rbac/users/{target_user['id']}/status", json={"is_active": False})
+        assert disabled.status_code == 200
+        assert disabled.json()["is_active"] is False
+        assert target.get("/api/v1/rbac/roles").status_code == 401
+        reenabled = admin.patch(f"/api/v1/rbac/users/{target_user['id']}/status", json={"is_active": True})
+        assert reenabled.status_code == 200
+        assert reenabled.json()["is_active"] is True
+        assert target.post("/api/v1/auth/login", json={"email": target_email, "password": "Password123!"}).status_code == 200
+
+
+def test_admin_cannot_change_own_status() -> None:
+    admin_email = "rbac-status-self@example.com"
+    with TestClient(app) as admin:
+        register(admin, admin_email)
+        set_role(admin_email, "admin")
+        users = admin.get("/api/v1/rbac/users").json()
+        owner = next(x for x in users if x["email"] == admin_email)
+        assert admin.patch(f"/api/v1/rbac/users/{owner['id']}/status", json={"is_active": False}).status_code == 400
+
+
 def test_feature_matrix() -> None:
     cases = [
         ("team_member", {"admin": False, "pricing": False, "manager": False, "security": True}),
